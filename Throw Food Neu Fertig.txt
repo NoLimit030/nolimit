@@ -1,0 +1,1978 @@
+-- NoLimit | Throw Food For Animals — Final Edition v2.0
+-- All automations start OFF. Uses the regular game controllers and verified client calls.
+-- Studio: run as a LocalScript in StarterPlayerScripts.
+-- Extensions: see NoLimit-UI-Hinweise.md; public API is returned and, when available,
+-- published as getgenv().NoLimitThrowFoodUI.
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local Stats = game:GetService("Stats")
+local player = Players.LocalPlayer
+assert(player, "NoLimit UI must run on the client.")
+local playerGui = player:WaitForChild("PlayerGui", 15)
+assert(playerGui, "NoLimit: PlayerGui is not available.")
+
+local GUI_NAME = "NoLimit_ThrowFood_UI"
+local old = playerGui:FindFirstChild(GUI_NAME)
+if old and old:GetAttribute("NoLimitOwned") == true then
+    local dispose = old:FindFirstChild("Dispose")
+    if dispose and dispose:IsA("BindableFunction") then
+        pcall(function() dispose:Invoke() end)
+    end
+    if old.Parent then old:Destroy() end
+end
+
+local UI = {Pages = {}, Version = "2.0"}
+local config = {Theme = "Mint", MenuKey = "RightShift", Scale = 1,
+    ShowMetrics = false, Animations = true}
+local themes = {
+    Mint = {accent = Color3.fromRGB(112, 244, 193), tint = Color3.fromRGB(22, 52, 44)},
+    Ice = {accent = Color3.fromRGB(119, 202, 255), tint = Color3.fromRGB(24, 43, 62)},
+    Lilac = {accent = Color3.fromRGB(191, 158, 255), tint = Color3.fromRGB(44, 33, 69)},
+    Sand = {accent = Color3.fromRGB(255, 205, 125), tint = Color3.fromRGB(59, 44, 27)},
+}
+local colors = {
+    bg = Color3.fromRGB(10, 14, 20), sidebar = Color3.fromRGB(13, 19, 27),
+    surface = Color3.fromRGB(19, 26, 35), raised = Color3.fromRGB(27, 36, 48),
+    hover = Color3.fromRGB(35, 47, 61), line = Color3.fromRGB(44, 57, 73),
+    text = Color3.fromRGB(240, 245, 250), muted = Color3.fromRGB(164, 179, 195),
+    faint = Color3.fromRGB(118, 138, 158), danger = Color3.fromRGB(255, 148, 158),
+}
+local connections, activeTweens, bindings, themeRefreshers = {}, {}, {}, {}
+local destroyed, visible, selected, capturingKey = false, true, nil, false
+local uiScale, fitScale, toastToken = 1, 1, 0
+local openTween, openDone, drag, sessionSeconds = nil, nil, nil, 0
+local refreshKey, toastTask, initialFitTask
+local tooltipHost, tooltipText, tooltipTarget, root
+local tooltipHelp = {}
+local startedAt = os.clock()
+local env = (type(getgenv) == "function" and getgenv()) or getfenv()
+local profileFolder = "NoLimit_ThrowFood_UI"
+local memoryProfiles = {}
+local extensionCleanups = {}
+
+function UI:AddCleanup(callback)
+    assert(type(callback) == "function", "Cleanup must be a function.")
+    if destroyed then pcall(callback) else extensionCleanups[#extensionCleanups + 1] = callback end
+end
+
+local function connect(signal, callback)
+    local c = signal:Connect(callback)
+    connections[#connections + 1] = c
+    return c
+end
+
+local function create(class, props, parent)
+    local obj = Instance.new(class)
+    for key, value in pairs(props or {}) do obj[key] = value end
+    obj.Parent = parent
+    return obj
+end
+
+local function round(obj, radius)
+    create("UICorner", {CornerRadius = UDim.new(0, radius or 10)}, obj)
+end
+
+local function border(obj, color)
+    return create("UIStroke", {Color = color or colors.line, Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Transparency = 0.25}, obj)
+end
+
+local function bind(obj, prop, token)
+    bindings[#bindings + 1] = {obj, prop, token}
+    obj[prop] = themes[config.Theme][token]
+end
+
+local function tween(obj, props, duration)
+    if activeTweens[obj] then activeTweens[obj]:Cancel(); activeTweens[obj] = nil end
+    if not config.Animations then
+        for key, value in pairs(props) do obj[key] = value end
+        return nil
+    end
+    local tw = TweenService:Create(obj, TweenInfo.new(duration or 0.16,
+        Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+    activeTweens[obj] = tw
+    tw:Play()
+    return tw
+end
+
+local function label(parent, text, x, y, w, h, size, color, bold)
+    return create("TextLabel", {BackgroundTransparency = 1, Text = text,
+        Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+        TextSize = size or 13, TextColor3 = color or colors.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd}, parent)
+end
+
+local function button(parent, text, x, y, w, h, callback, accent)
+    local b = create("TextButton", {Text = text, AutoButtonColor = false,
+        Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        BackgroundColor3 = colors.raised, TextColor3 = colors.text,
+        Font = Enum.Font.GothamMedium, TextSize = 12, BorderSizePixel = 0}, parent)
+    round(b, 8)
+    create("UIGradient", {Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(221, 230, 241)), Rotation = 90}, b)
+    if accent then
+        bind(b, "BackgroundColor3", "accent"); b.TextColor3 = colors.bg
+    else
+        border(b)
+        connect(b.MouseEnter, function() tween(b, {BackgroundColor3 = colors.hover}) end)
+        connect(b.MouseLeave, function() tween(b, {BackgroundColor3 = colors.raised}) end)
+    end
+    if callback then connect(b.Activated, function() if not destroyed then callback() end end) end
+    return b
+end
+
+local function padding(parent, n)
+    create("UIPadding", {PaddingTop = UDim.new(0, n), PaddingBottom = UDim.new(0, n),
+        PaddingLeft = UDim.new(0, n), PaddingRight = UDim.new(0, n)}, parent)
+end
+
+local function gradient(parent, first, last, rotation)
+    -- UIGradient multiplies the host color; use white for literal palette colors.
+    parent.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    return create("UIGradient", {Color = ColorSequence.new(first, last), Rotation = rotation or 0}, parent)
+end
+
+local function accentGradient(parent, rotation)
+    local g = gradient(parent, themes[config.Theme].tint, colors.surface, rotation or 25)
+    themeRefreshers[#themeRefreshers + 1] = function()
+        g.Color = ColorSequence.new(themes[config.Theme].tint, colors.surface)
+    end
+    return g
+end
+
+function UI:SetTooltip(target, text)
+    if destroyed or not target then return end
+    local help = tostring(text or "")
+    if help == "" then return end
+    if tooltipHelp[target] then tooltipHelp[target] = help; return end
+    tooltipHelp[target] = help
+    connect(target.MouseEnter, function()
+        if destroyed or not tooltipHost then return end
+        tooltipTarget = target; tooltipText.Text = tooltipHelp[target] or help
+        local relative = target.AbsolutePosition - root.AbsolutePosition
+        local size = root.AbsoluteSize
+        local x = math.clamp(relative.X, 8, math.max(8, size.X - 328))
+        local y = relative.Y + target.AbsoluteSize.Y + 8
+        if y + 88 > size.Y then y = math.max(8, relative.Y - 96) end
+        tooltipHost.Position = UDim2.fromOffset(x, y); tooltipHost.Visible = true
+    end)
+    connect(target.MouseLeave, function()
+        if tooltipHost and tooltipTarget == target then tooltipTarget = nil; tooltipHost.Visible = false end
+    end)
+    connect(target.Destroying, function()
+        tooltipHelp[target] = nil
+        if tooltipHost and tooltipTarget == target then tooltipTarget = nil; tooltipHost.Visible = false end
+    end)
+end
+UI.AttachTooltip = UI.SetTooltip
+
+-- A lightweight native crown; no downloads or bitmap dependencies.
+local function crown(parent, x, y, size)
+    local holder = create("Frame", {BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(size, size)}, parent)
+    local function line(ax, ay, bx, by)
+        local dx, dy = bx - ax, by - ay
+        local f = create("Frame", {BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromOffset((ax + bx) * size / 2, (ay + by) * size / 2),
+            Size = UDim2.fromOffset(math.sqrt(dx * dx + dy * dy) * size, math.max(1.5, size * 0.045)),
+            Rotation = math.deg(math.atan2(dy, dx))}, holder)
+        bind(f, "BackgroundColor3", "accent"); round(f, 2)
+    end
+    line(.16, .34, .32, .53); line(.32, .53, .50, .22)
+    line(.50, .22, .68, .53); line(.68, .53, .84, .34)
+    line(.84, .34, .75, .75); line(.75, .75, .25, .75)
+    line(.25, .75, .16, .34); line(.28, .85, .72, .85)
+    return holder
+end
+
+local gui = create("ScreenGui", {Name = GUI_NAME, ResetOnSpawn = false,
+    IgnoreGuiInset = false, DisplayOrder = 70, ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, playerGui)
+gui:SetAttribute("NoLimitOwned", true)
+local disposer = create("BindableFunction", {Name = "Dispose"}, gui)
+root = create("Frame", {Name = "Screen", BackgroundTransparency = 1,
+    Size = UDim2.fromScale(1, 1)}, gui)
+local main = create("Frame", {Name = "Window", Size = UDim2.fromOffset(960, 640),
+    Position = UDim2.new(.5, -480, .5, -320), BackgroundColor3 = colors.bg,
+    BorderSizePixel = 0, ClipsDescendants = true}, root)
+round(main, 16); border(main)
+gradient(main, colors.bg, Color3.fromRGB(15, 23, 34), 42)
+local scale = create("UIScale", {Scale = 1}, main)
+local sidebar = create("Frame", {Name = "Sidebar", BackgroundColor3 = colors.sidebar,
+    Size = UDim2.new(0, 192, 1, 0), BorderSizePixel = 0}, main)
+create("Frame", {BackgroundColor3 = colors.line, BorderSizePixel = 0,
+    Position = UDim2.fromOffset(191, 0), Size = UDim2.new(0, 1, 1, 0)}, sidebar)
+do
+    gradient(sidebar, colors.sidebar, Color3.fromRGB(11, 17, 25), 90)
+    local crest = create("Frame", {Position = UDim2.fromOffset(18, 23), Size = UDim2.fromOffset(36, 36), BorderSizePixel = 0}, sidebar)
+    round(crest, 11); bind(crest, "BackgroundColor3", "tint"); border(crest)
+    crown(crest, 3, 1, 30)
+    label(sidebar, "NoLimit", 64, 25, 110, 26, 22, colors.text, true)
+    local edition = label(sidebar, "CONTROL ROOM", 65, 53, 110, 12, 8, colors.faint, true)
+    bind(edition, "TextColor3", "accent")
+    label(sidebar, "THROW FOOD", 23, 88, 150, 15, 10, colors.muted, true)
+    label(sidebar, "FOR ANIMALS", 23, 105, 150, 15, 10, colors.muted, true)
+    label(sidebar, "YOUR TOOLS", 23, 145, 150, 14, 9, colors.faint, true)
+end
+
+local navHost = create("ScrollingFrame", {Name = "Navigation", BackgroundTransparency = 1,
+    BorderSizePixel = 0, Position = UDim2.fromOffset(12, 174),
+    Size = UDim2.new(1, -24, 1, -298), CanvasSize = UDim2.new(),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 2,
+    ScrollBarImageColor3 = colors.line}, sidebar)
+create("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, navHost)
+create("Frame", {BackgroundColor3 = colors.line, BorderSizePixel = 0,
+    Position = UDim2.new(0, 20, 1, -111), Size = UDim2.new(1, -40, 0, 1)}, sidebar)
+local avatar = create("Frame", {BackgroundColor3 = colors.raised, BorderSizePixel = 0,
+    Position = UDim2.new(0, 22, 1, -90), Size = UDim2.fromOffset(32, 32)}, sidebar)
+round(avatar, 10)
+local initial = label(avatar, string.sub(player.DisplayName or player.Name, 1, 1):upper(), 0, 0, 32, 32, 13, colors.text, true)
+initial.TextXAlignment = Enum.TextXAlignment.Center
+label(sidebar, player.DisplayName or player.Name, 65, 550, 109, 19, 12, colors.text, true)
+label(sidebar, "Your workspace", 65, 571, 109, 15, 10, colors.faint)
+label(sidebar, "NOLIMIT  //  PLAY YOUR WAY", 23, 610, 153, 14, 8, colors.faint)
+
+local header = create("Frame", {Name = "Header", BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(192, 0), Size = UDim2.new(1, -192, 0, 106)}, main)
+local dragHandle = create("Frame", {Name = "DragHandle", BackgroundTransparency = 1,
+    Active = true, Size = UDim2.new(1, -156, 1, 0)}, header)
+local headerEyebrow = label(header, "SESSION CONTROL  /  NOLIMIT", 28, 20, 400, 13, 9, colors.faint, true)
+bind(headerEyebrow, "TextColor3", "accent")
+local titleLabel = label(header, "Overview", 28, 42, 440, 31, 25, colors.text, true)
+local subtitleLabel = label(header, "Everything in one place.", 28, 79, 510, 17, 12, colors.muted)
+button(header, "Hide", 624, 24, 60, 30, function() UI:SetVisible(false) end)
+local closeButton = button(header, "×", 694, 24, 42, 30, function() UI:Destroy() end)
+closeButton.TextSize = 22
+do
+    local rail = create("Frame", {Position = UDim2.fromOffset(192, 0), Size = UDim2.new(1, -192, 0, 2), BorderSizePixel = 0}, main)
+    bind(rail, "BackgroundColor3", "accent")
+    create("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, .08),
+        NumberSequenceKeypoint.new(.5, .45), NumberSequenceKeypoint.new(1, 1)})}, rail)
+    create("Frame", {Position = UDim2.fromOffset(220, 111), Size = UDim2.new(1, -248, 0, 1),
+        BackgroundColor3 = colors.line, BackgroundTransparency = .35, BorderSizePixel = 0}, main)
+end
+local content = create("Frame", {Name = "Content", BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(220, 126), Size = UDim2.new(1, -248, 1, -160)}, main)
+local footer = label(main, "Right Shift to hide  ·  Ctrl + End to close", 220, 610, 610, 15, 10, colors.faint)
+label(main, "2.0", 883, 610, 49, 15, 9, colors.faint)
+
+local launcher = create("TextButton", {Name = "Launcher", Text = "", AutoButtonColor = false,
+    BackgroundColor3 = colors.sidebar, BorderSizePixel = 0, Visible = false,
+    Position = UDim2.fromOffset(24, 160), Size = UDim2.fromOffset(52, 52)}, root)
+round(launcher, 16); border(launcher); crown(launcher, 7, 5, 38)
+accentGradient(launcher, 45)
+
+local metrics = create("Frame", {Name = "Performance", BackgroundColor3 = colors.sidebar,
+    Size = UDim2.fromOffset(240, 112), Position = UDim2.new(1, -264, 0, 24),
+    BorderSizePixel = 0, Visible = false}, root)
+round(metrics, 12); border(metrics)
+gradient(metrics, colors.surface, colors.sidebar, 25)
+local metricsAccent = create("Frame", {BorderSizePixel = 0, Position = UDim2.fromOffset(16, 32),
+    Size = UDim2.fromOffset(22, 2)}, metrics)
+bind(metricsAccent, "BackgroundColor3", "accent")
+local metricsHandle = create("Frame", {Name = "DragHandle", BackgroundTransparency = 1,
+    Size = UDim2.fromOffset(188, 34), Active = true}, metrics)
+label(metrics, "PERFORMANCE", 16, 12, 170, 14, 9, colors.muted, true)
+button(metrics, "×", 202, 6, 30, 26, function() UI:SetMetrics(false) end).TextSize = 18
+local fpsLabel = label(metrics, "— FPS", 16, 43, 105, 27, 23, colors.text, true)
+local pingLabel = label(metrics, "— ms", 129, 43, 99, 27, 23, colors.text, true)
+label(metrics, "FRAME RATE", 16, 80, 105, 12, 8, colors.faint, true)
+label(metrics, "LATENCY", 129, 80, 99, 12, 8, colors.faint, true)
+
+local toast = create("Frame", {Name = "Notification", BackgroundColor3 = colors.raised,
+    BorderSizePixel = 0, Visible = false, Size = UDim2.fromOffset(340, 52),
+    AnchorPoint = Vector2.new(.5, 1), Position = UDim2.new(.5, 0, 1, -24), ZIndex = 20}, root)
+round(toast, 12); border(toast)
+local toastText = label(toast, "", 16, 8, 308, 36, 12, colors.text)
+toastText.TextWrapped = true; toastText.TextTruncate = Enum.TextTruncate.None; toastText.ZIndex = 21
+tooltipHost = create("Frame", {Name = "Tooltip", BackgroundColor3 = colors.raised, BorderSizePixel = 0,
+    Size = UDim2.fromOffset(320, 88), Visible = false, ZIndex = 40}, root)
+round(tooltipHost, 10); border(tooltipHost)
+tooltipText = label(tooltipHost, "", 14, 10, 292, 68, 11, colors.text)
+tooltipText.TextWrapped = true; tooltipText.TextTruncate = Enum.TextTruncate.None; tooltipText.ZIndex = 41
+UI:SetTooltip(closeButton, "Close NoLimit completely. You can also press Ctrl + End.")
+UI:SetTooltip(launcher, "Click to open NoLimit. Drag to move this shortcut.")
+function UI:Notify(message)
+    if destroyed then return end
+    toastToken = toastToken + 1
+    local token = toastToken
+    if toastTask then pcall(task.cancel, toastTask); toastTask = nil end
+    toastText.Text = tostring(message); toast.Visible = true
+    toastTask = task.delay(3.5, function()
+        if not destroyed and token == toastToken then toast.Visible = false end
+        toastTask = nil
+    end)
+end
+
+local function refreshTheme()
+    local theme = themes[config.Theme]
+    for _, item in ipairs(bindings) do
+        if item[1].Parent then
+            if activeTweens[item[1]] then activeTweens[item[1]]:Cancel(); activeTweens[item[1]] = nil end
+            item[1][item[2]] = theme[item[3]]
+        end
+    end
+    for _, fn in ipairs(themeRefreshers) do fn() end
+end
+
+function UI:SetTheme(name)
+    if destroyed or not themes[name] then return false end
+    config.Theme = name; refreshTheme(); return true
+end
+function UI:IsVisible() return visible and not destroyed end
+function UI:IsDestroyed() return destroyed end
+function UI:GetConfig()
+    local copy = {}; for key, value in pairs(config) do copy[key] = value end; return copy
+end
+
+local function viewport() return root.AbsoluteSize end
+local function clampFrame(frame, width, height)
+    local area = viewport()
+    local x, y = frame.Position.X.Offset, frame.Position.Y.Offset
+    x = math.clamp(x, 8, math.max(8, area.X - width - 8))
+    y = math.clamp(y, 8, math.max(8, area.Y - height - 8))
+    frame.Position = UDim2.fromOffset(x, y)
+end
+
+local function fitWindow(center)
+    local area = viewport()
+    if area.X < 1 or area.Y < 1 then return end
+    fitScale = math.min(1, (area.X - 24) / 960, (area.Y - 24) / 640)
+    uiScale = math.max(.1, fitScale * config.Scale)
+    scale.Scale = uiScale
+    if center then
+        main.Position = UDim2.fromOffset(math.floor((area.X - 960 * uiScale) / 2), math.floor((area.Y - 640 * uiScale) / 2))
+    else
+        clampFrame(main, 960 * uiScale, 640 * uiScale)
+    end
+    -- Resolve Scale-based positions before clamping floating windows.
+    metrics.Position = UDim2.fromOffset(metrics.AbsolutePosition.X - root.AbsolutePosition.X,
+        metrics.AbsolutePosition.Y - root.AbsolutePosition.Y)
+    clampFrame(metrics, 240, 112); clampFrame(launcher, 52, 52)
+end
+
+local function cancelOpenTween()
+    if openDone then openDone:Disconnect(); openDone = nil end
+    local tracked = activeTweens[scale]
+    if tracked then tracked:Cancel() end
+    if openTween and openTween ~= tracked then openTween:Cancel() end
+    openTween = nil
+    activeTweens[scale] = nil
+end
+function UI:SetVisible(value)
+    if destroyed then return end
+    visible = value == true; capturingKey = false
+    if tooltipHost then tooltipHost.Visible = false; tooltipTarget = nil end
+    if refreshKey then refreshKey() end
+    cancelOpenTween()
+    launcher.Visible = not visible
+    if visible then
+        main.Visible = true
+        scale.Scale = config.Animations and uiScale * .975 or uiScale
+        tween(scale, {Scale = uiScale}, .18)
+    elseif config.Animations then
+        openTween = tween(scale, {Scale = uiScale * .975}, .12)
+        openDone = openTween.Completed:Connect(function(state)
+            if state == Enum.PlaybackState.Completed and not visible and not destroyed then main.Visible = false end
+        end)
+    else main.Visible = false end
+end
+
+-- All dragging uses physical screen pixels. The content alone is scaled.
+local function beginDrag(target, input, click)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    if target == main then cancelOpenTween(); scale.Scale = uiScale end
+    local absolute = target.AbsolutePosition - root.AbsolutePosition
+    target.Position = UDim2.fromOffset(absolute.X, absolute.Y)
+    drag = {target = target, input = input, start = input.Position,
+        position = absolute, moved = false, click = click}
+end
+connect(dragHandle.InputBegan, function(input) beginDrag(main, input) end)
+connect(metricsHandle.InputBegan, function(input) beginDrag(metrics, input) end)
+connect(launcher.InputBegan, function(input) beginDrag(launcher, input, function() UI:SetVisible(true) end) end)
+connect(UIS.InputChanged, function(input)
+    if not drag then return end
+    local touch = drag.input.UserInputType == Enum.UserInputType.Touch
+    if (touch and input ~= drag.input) or (not touch and input.UserInputType ~= Enum.UserInputType.MouseMovement) then return end
+    local delta = input.Position - drag.start
+    if delta.Magnitude > 5 then drag.moved = true end
+    if drag.moved then
+        local target = drag.target
+        target.Position = UDim2.fromOffset(drag.position.X + delta.X, drag.position.Y + delta.Y)
+        local factor = target == main and uiScale or 1
+        clampFrame(target, target.Size.X.Offset * factor, target.Size.Y.Offset * factor)
+    end
+end)
+connect(UIS.InputEnded, function(input)
+    if not drag then return end
+    if input == drag.input or (drag.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1) then
+        local finished = drag; drag = nil
+        if not finished.moved and finished.click then finished.click() end
+    end
+end)
+connect(UIS.WindowFocusReleased, function() drag = nil end)
+
+local pageOrder = 0
+function UI:AddPage(id, title, subtitle, icon)
+    assert(not destroyed, "NoLimit UI is closed.")
+    assert(type(id) == "string" and not self.Pages[id], "Page IDs must be unique strings.")
+    pageOrder = pageOrder + 1
+    local nav = create("TextButton", {Name = id, Text = "", AutoButtonColor = false,
+        Size = UDim2.new(1, -2, 0, 38), BackgroundTransparency = 1,
+        BorderSizePixel = 0, LayoutOrder = pageOrder}, navHost)
+    round(nav, 8)
+    local marker = create("Frame", {BorderSizePixel = 0, Visible = false,
+        Position = UDim2.fromOffset(0, 10), Size = UDim2.fromOffset(3, 18)}, nav)
+    round(marker, 2); bind(marker, "BackgroundColor3", "accent")
+    local navStroke = border(nav); navStroke.Transparency = 1
+    local navIcon = label(nav, icon or "•", 14, 0, 22, 38, 16, colors.muted)
+    local navText = label(nav, title, 44, 0, 116, 38, 12, colors.muted)
+    local scroll = create("ScrollingFrame", {Name = id, BackgroundTransparency = 1,
+        BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), Visible = false,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = colors.line,
+        ScrollingDirection = Enum.ScrollingDirection.Y}, content)
+    padding(scroll, 2)
+    create("UIListLayout", {Padding = UDim.new(0, 14), SortOrder = Enum.SortOrder.LayoutOrder}, scroll)
+    local page = {Id = id, Title = title, Subtitle = subtitle or "", Frame = scroll, Sections = {}, _order = 0}
+    self.Pages[id] = page
+    local function updateNav()
+        local active = selected == id
+        nav.BackgroundTransparency = active and 0 or 1
+        nav.BackgroundColor3 = themes[config.Theme].tint
+        navText.TextColor3 = active and themes[config.Theme].accent or colors.muted
+        navIcon.TextColor3 = navText.TextColor3; marker.Visible = active
+        navStroke.Color = themes[config.Theme].accent; navStroke.Transparency = active and .78 or 1
+    end
+    themeRefreshers[#themeRefreshers + 1] = updateNav
+    connect(nav.Activated, function() self:SelectPage(id) end)
+    connect(nav.MouseEnter, function()
+        if selected ~= id then nav.BackgroundColor3 = colors.raised; nav.BackgroundTransparency = 0 end
+    end)
+    connect(nav.MouseLeave, updateNav)
+    function page:AddSection(sectionTitle, description)
+        assert(not destroyed, "NoLimit UI is closed.")
+        self._order = self._order + 1
+        local box = create("Frame", {BackgroundColor3 = colors.surface, BorderSizePixel = 0,
+            Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = self._order}, scroll)
+        round(box, 12); border(box); padding(box, 18)
+        gradient(box, colors.surface, Color3.fromRGB(16, 23, 32), 90)
+        create("UIListLayout", {Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder}, box)
+        local heading = label(box, sectionTitle, 0, 0, 620, 22, 14, colors.text, true)
+        heading.Size = UDim2.new(1, 0, 0, 22); heading.LayoutOrder = 0
+        if description and description ~= "" then
+            local desc = label(box, description, 0, 0, 620, 20, 12, colors.muted)
+            desc.Size = UDim2.new(1, 0, 0, 0); desc.AutomaticSize = Enum.AutomaticSize.Y
+            desc.TextWrapped = true; desc.TextTruncate = Enum.TextTruncate.None; desc.LayoutOrder = 1
+        end
+        local section = {Frame = box, _order = 1}
+        self.Sections[#self.Sections + 1] = section
+        function section:Row(title, description, height)
+            self._order = self._order + 1
+            local row = create("Frame", {BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, height or 58), LayoutOrder = self._order}, box)
+            local t = label(row, title, 0, 5, 450, 20, 12, colors.text, true)
+            t.Size = UDim2.new(1, -164, 0, 20)
+            if description and description ~= "" then
+                local d = label(row, description, 0, 29, 450, 16, 11, colors.muted)
+                d.Size = UDim2.new(1, -164, 0, 16)
+            end
+            return row
+        end
+        function section:AddStatus(statusTitle, value)
+            local row = self:Row(statusTitle, nil, 32)
+            row.AutomaticSize = Enum.AutomaticSize.Y
+            local title = row:FindFirstChildOfClass("TextLabel")
+            title.Size = UDim2.new(.36, -10, 0, 22)
+            title.Position = UDim2.fromOffset(0, 4)
+            title.AutomaticSize = Enum.AutomaticSize.Y
+            title.TextWrapped = true; title.TextTruncate = Enum.TextTruncate.None
+            local valueLabel = label(row, tostring(value), 0, 4, 155, 22, 12, colors.muted)
+            valueLabel.Size = UDim2.new(.64, -8, 0, 22)
+            valueLabel.Position = UDim2.new(.36, 8, 0, 4)
+            valueLabel.AutomaticSize = Enum.AutomaticSize.Y
+            valueLabel.TextWrapped = true; valueLabel.TextTruncate = Enum.TextTruncate.None
+            valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+            return {Set = function(_, newValue) if not destroyed then valueLabel.Text = tostring(newValue) end end}
+        end
+        function section:AddButton(options)
+            local row = self:Row(options.Title, options.Description)
+            local b = button(row, options.Text or "Open", 0, 10, 140, 34, function()
+                if options.Callback then
+                    local ok, err = pcall(options.Callback)
+                    if not ok then warn("NoLimit button: " .. tostring(err)); UI:Notify("This action could not be completed.") end
+                end
+            end, options.Accent)
+            b.Position = UDim2.new(1, -140, 0, 10)
+            UI:SetTooltip(b, options.Help or options.Description)
+            return b
+        end
+        function section:AddToggle(options)
+            local row = self:Row(options.Title, options.Description)
+            local value, enabled, busy = options.Default == true, true, false
+            local stateLabel = label(row, "OFF", 0, 18, 38, 16, 9, colors.muted, true)
+            stateLabel.Position = UDim2.new(1, -108, 0, 18)
+            local track = create("TextButton", {Name = options.Id or options.Title, Text = "",
+                AutoButtonColor = false, BackgroundColor3 = colors.raised, BorderSizePixel = 0,
+                Position = UDim2.new(1, -56, 0, 12), Size = UDim2.fromOffset(52, 28)}, row)
+            round(track, 14)
+            local dot = create("Frame", {BorderSizePixel = 0, BackgroundColor3 = colors.muted,
+                Position = UDim2.fromOffset(4, 4), Size = UDim2.fromOffset(20, 20)}, track)
+            round(dot, 10)
+            local function paint()
+                local theme = themes[config.Theme]
+                track.BackgroundTransparency = enabled and 0 or .5
+                stateLabel.Text = value and "ON" or "OFF"
+                stateLabel.TextColor3 = value and theme.accent or colors.muted
+                tween(track, {BackgroundColor3 = value and theme.tint or colors.raised})
+                tween(dot, {Position = UDim2.fromOffset(value and 28 or 4, 4),
+                    BackgroundColor3 = value and theme.accent or colors.muted})
+            end
+            local controller = {}
+            function controller:Set(newValue, silent)
+                if destroyed or busy or (not enabled and not silent) then return false end
+                newValue = newValue == true
+                if newValue == value then return true end
+                if not silent and options.Callback then
+                    busy = true
+                    local ok, result = pcall(options.Callback, newValue)
+                    busy = false
+                    if not ok or result == false then
+                        if not ok then warn("NoLimit toggle: " .. tostring(result)) end
+                        UI:Notify("The setting could not be changed."); return false
+                    end
+                end
+                if destroyed then return false end
+                value = newValue; paint(); return true
+            end
+            function controller:Get() return value end
+            function controller:SetEnabled(newValue)
+                if destroyed then return end
+                enabled = newValue == true; paint()
+            end
+            connect(track.Activated, function() controller:Set(not value) end)
+            UI:SetTooltip(track, options.Help or options.Description)
+            if options.Help and options.Help ~= "" then
+                local help = button(row, "?", 0, 16, 20, 20, function() UI:Notify(options.Help) end)
+                help.Position = UDim2.new(1, -143, 0, 16); help.TextColor3 = colors.muted
+                UI:SetTooltip(help, options.Help)
+            end
+            themeRefreshers[#themeRefreshers + 1] = paint; paint()
+            return controller
+        end
+        return section
+    end
+    updateNav()
+    return page
+end
+
+function UI:SelectPage(id)
+    if destroyed or not self.Pages[id] then return false end
+    selected = id; capturingKey = false
+    if tooltipHost then tooltipHost.Visible = false; tooltipTarget = nil end
+    if refreshKey then refreshKey() end
+    for pageId, page in pairs(self.Pages) do page.Frame.Visible = pageId == id end
+    titleLabel.Text = self.Pages[id].Title; subtitleLabel.Text = self.Pages[id].Subtitle
+    for _, fn in ipairs(themeRefreshers) do fn() end
+    return true
+end
+
+-- Pages and layout. New sections can be appended without touching navigation.
+local overview = UI:AddPage("overview", "Overview", "A little less clutter. Everything within reach.", "▦")
+UI:AddPage("farming", "Farming", "Your food, your throws, your pace.", "↗")
+UI:AddPage("training", "Training", "Make room for a stronger throw.", "+")
+UI:AddPage("animals", "Animals", "Keep your collection in view.", "◇")
+UI:AddPage("rewards", "Rewards", "A place for every little extra.", "☆")
+local settings = UI:AddPage("settings", "Settings", "Make NoLimit feel like yours.", "⚙")
+
+local hero = create("Frame", {Name = "Welcome", BackgroundColor3 = colors.surface,
+    BorderSizePixel = 0, ClipsDescendants = true, Size = UDim2.new(1, -6, 0, 144), LayoutOrder = 0}, overview.Frame)
+round(hero, 12); border(hero)
+accentGradient(hero, 15)
+local heroGlow, heroStars = nil, {}
+do
+    -- Native orbital geometry: subtle pulse only while the overview is visible.
+    for i, size in ipairs({192, 148, 104}) do
+        local orbit = create("Frame", {BackgroundTransparency = 1, Size = UDim2.fromOffset(size, size),
+            Position = UDim2.fromOffset(620 - size / 2, 73 - size / 2), Rotation = i * 15, BorderSizePixel = 0}, hero)
+        round(orbit, size / 2)
+        local edge = border(orbit); edge.Transparency = .78 + i * .03
+        bind(edge, "Color", "accent")
+    end
+    local glow = create("Frame", {Position = UDim2.fromOffset(573, 26), Size = UDim2.fromOffset(94, 94),
+        BackgroundTransparency = .66, BorderSizePixel = 0}, hero)
+    round(glow, 47); bind(glow, "BackgroundColor3", "tint")
+    heroGlow = glow
+    for i = 1, 6 do
+        local beam = create("Frame", {Position = UDim2.fromOffset(451 + i * 31, -22), Size = UDim2.fromOffset(1, 203),
+            Rotation = 26, BackgroundTransparency = .92, BorderSizePixel = 0}, hero)
+        bind(beam, "BackgroundColor3", "accent")
+    end
+    for i, p in ipairs({{524,25},{680,30},{570,119},{696,109},{532,88},{651,131}}) do
+        local star = create("Frame", {Position = UDim2.fromOffset(p[1], p[2]), Size = UDim2.fromOffset(i % 2 + 2, i % 2 + 2),
+            Rotation = 45, BackgroundTransparency = .18 + (i % 3) * .12, BorderSizePixel = 0}, hero)
+        bind(star, "BackgroundColor3", "accent")
+        heroStars[#heroStars + 1] = star
+    end
+    crown(hero, 583, 30, 74)
+end
+local heroPill = create("Frame", {BorderSizePixel = 0, Position = UDim2.fromOffset(22, 20),
+    Size = UDim2.fromOffset(142, 23)}, hero)
+round(heroPill, 6); bind(heroPill, "BackgroundColor3", "tint")
+local pillLabel = label(heroPill, "YOUR GAME. YOUR RULES.", 0, 0, 142, 23, 8, nil, true)
+pillLabel.TextXAlignment = Enum.TextXAlignment.Center; bind(pillLabel, "TextColor3", "accent")
+label(hero, "PLAY YOUR WAY.", 22, 53, 465, 36, 30, colors.text, true)
+label(hero, "Throw Food For Animals — one clean control room.", 22, 98, 470, 21, 12, colors.muted)
+local heroLine = create("Frame", {BorderSizePixel = 0, Position = UDim2.fromOffset(22, 134),
+    Size = UDim2.fromOffset(72, 2)}, hero); bind(heroLine, "BackgroundColor3", "accent")
+
+local statHost = create("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1, -6, 0, 80),
+    LayoutOrder = 1}, overview.Frame)
+local statValues = {}
+for i, data in ipairs({{"SESSION", "00:00", "Time together"}, {"WORKSPACE", "Ready", "Your interface is ready"}, {"GAME FEATURES", "—", "No features added yet"}}) do
+    local card = create("Frame", {BackgroundColor3 = colors.surface, BorderSizePixel = 0,
+        Position = UDim2.new((i - 1) / 3, (i - 1) * 4, 0, 0),
+        Size = UDim2.new(1 / 3, -8, 1, 0)}, statHost)
+    round(card, 10); border(card)
+    gradient(card, colors.surface, Color3.fromRGB(18, 25, 35), 110)
+    local edge = create("Frame", {Position = UDim2.fromOffset(0, 22), Size = UDim2.fromOffset(2, 36),
+        BorderSizePixel = 0, BackgroundTransparency = .25}, card)
+    bind(edge, "BackgroundColor3", "accent")
+    label(card, data[1], 14, 12, 190, 12, 9, colors.faint, true)
+    statValues[i] = label(card, data[2], 14, 30, 190, 25, 21, colors.text, true)
+    label(card, data[3], 14, 61, 190, 12, 9, colors.muted)
+end
+local shortcuts = overview:AddSection("Quick access", "Less searching. More playing.")
+shortcuts:AddButton({Title = "Farming & training", Description = "Everything for your next throw.", Text = "Explore  →",
+    Callback = function() UI:SelectPage("farming") end})
+shortcuts:AddButton({Title = "Your collection", Description = "A home for your animal controls.", Text = "Animals  →",
+    Callback = function() UI:SelectPage("animals") end})
+-- Put the section after the manually created hero and stats.
+shortcuts.Frame.LayoutOrder = 2
+
+local function emptyPage(id, symbol, title, description)
+    local page = UI.Pages[id]
+    local card = create("Frame", {BackgroundColor3 = colors.surface, BorderSizePixel = 0,
+        Size = UDim2.new(1, -6, 0, 304), LayoutOrder = 0}, page.Frame)
+    round(card, 12); border(card)
+    local icon = label(card, symbol, 0, 44, 698, 48, 36, colors.muted)
+    icon.TextXAlignment = Enum.TextXAlignment.Center; bind(icon, "TextColor3", "accent")
+    local heading = label(card, title, 34, 115, 630, 30, 21, colors.text, true)
+    heading.TextXAlignment = Enum.TextXAlignment.Center
+    local desc = label(card, description, 64, 157, 570, 48, 12, colors.muted)
+    desc.TextWrapped = true; desc.TextTruncate = Enum.TextTruncate.None
+    desc.TextXAlignment = Enum.TextXAlignment.Center
+    button(card, "Back to overview", 269, 232, 160, 34, function() UI:SelectPage("overview") end)
+    page.Placeholder = card
+    function page:ClearPlaceholder()
+        if self.Placeholder then self.Placeholder:Destroy(); self.Placeholder = nil end
+    end
+end
+emptyPage("farming", "↗", "Your next throw starts here.", "Your farming controls will appear here.\nNothing is running in the background.")
+emptyPage("training", "+", "A space to grow stronger.", "Your training controls will appear here.\nEverything stays in one clear place.")
+emptyPage("animals", "◇", "Every animal, in its place.", "Your collection controls will appear here.\nA clean space for your favorites.")
+emptyPage("rewards", "☆", "Good things belong together.", "Your reward controls will appear here.\nNo rewards are being claimed automatically.")
+
+local appearance = settings:AddSection("Appearance", "A quiet palette. One consistent look.")
+local themeRow = appearance:Row("", nil, 72)
+local themeButtons = {}
+for i, name in ipairs({"Mint", "Ice", "Lilac", "Sand"}) do
+    local b = button(themeRow, "", (i - 1) * 165, 0, 152, 66, function() UI:SetTheme(name) end)
+    local swatch = create("Frame", {BorderSizePixel = 0, BackgroundColor3 = themes[name].accent,
+        Position = UDim2.fromOffset(12, 13), Size = UDim2.fromOffset(18, 18)}, b)
+    round(swatch, 6)
+    label(b, name, 39, 10, 100, 23, 12, colors.text, true)
+    local chosen = label(b, "", 12, 40, 130, 13, 9, colors.muted)
+    themeButtons[name] = chosen
+end
+themeRefreshers[#themeRefreshers + 1] = function()
+    for name, chosen in pairs(themeButtons) do
+        chosen.Text = name == config.Theme and "SELECTED" or "Choose palette"
+        chosen.TextColor3 = name == config.Theme and themes[name].accent or colors.faint
+    end
+end
+
+local animationToggle, metricToggle
+animationToggle = appearance:AddToggle({Id = "Animations", Title = "Smooth transitions",
+    Description = "Gentle movement when opening the menu.", Default = true,
+    Callback = function(value)
+        config.Animations = value; cancelOpenTween()
+        scale.Scale = uiScale; main.Visible = visible
+    end})
+local display = settings:AddSection("Display & shortcuts", "Keep the essentials close.")
+metricToggle = display:AddToggle({Id = "ShowMetrics", Title = "Performance window",
+    Description = "A separate, draggable FPS and ping display.",
+    Callback = function(value) UI:SetMetrics(value) end})
+function UI:SetMetrics(value)
+    if destroyed then return end
+    config.ShowMetrics = value == true; metrics.Visible = config.ShowMetrics
+    if metricToggle then metricToggle:Set(config.ShowMetrics, true) end
+end
+local scaleRow = display:Row("Interface size", "Automatically fits your screen.")
+local scaleValue = label(scaleRow, "100%", 0, 14, 53, 25, 12, colors.text, true)
+scaleValue.Position = UDim2.new(1, -97, 0, 14); scaleValue.TextXAlignment = Enum.TextXAlignment.Center
+local function setScale(value)
+    config.Scale = math.clamp(value, .75, 1)
+    scaleValue.Text = tostring(math.floor(config.Scale * 100 + .5)) .. "%"
+    cancelOpenTween(); fitWindow(false)
+end
+button(scaleRow, "−", 0, 10, 32, 34, function() setScale(config.Scale - .05) end).Position = UDim2.new(1, -138, 0, 10)
+button(scaleRow, "+", 0, 10, 32, 34, function() setScale(config.Scale + .05) end).Position = UDim2.new(1, -32, 0, 10)
+local keyButton = display:AddButton({Title = "Menu shortcut", Description = "Press Escape to cancel a new shortcut.",
+    Text = "Right Shift", Callback = function()
+        capturingKey = not capturingKey
+        if refreshKey then refreshKey() end
+    end})
+local function readableKey(name)
+    return name:gsub("(%l)(%u)", "%1 %2")
+end
+refreshKey = function()
+    keyButton.Text = capturingKey and "Press a key…" or readableKey(config.MenuKey)
+    footer.Text = readableKey(config.MenuKey) .. " to hide  ·  Ctrl + End to close"
+end
+
+-- Profiles store interface settings only. Unsupported file APIs fall back to this session.
+local profiles = settings:AddSection("Profiles", "Save a look you can return to.")
+local profileRow = profiles:Row("", nil, 42)
+local nameBox = create("TextBox", {Name = "ProfileName", Text = "Default", PlaceholderText = "Profile name",
+    ClearTextOnFocus = false, BackgroundColor3 = colors.bg, BorderSizePixel = 0,
+    Size = UDim2.new(1, -214, 0, 36), Position = UDim2.fromOffset(0, 2),
+    Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = colors.text,
+    PlaceholderColor3 = colors.faint, TextXAlignment = Enum.TextXAlignment.Left}, profileRow)
+round(nameBox, 8); border(nameBox); padding(nameBox, 10)
+local profileState = profiles:AddStatus("Storage", "This session")
+local fileReady = type(env.writefile) == "function" and type(env.readfile) == "function"
+    and type(env.makefolder) == "function"
+if fileReady then
+    local ok = pcall(function()
+        if type(env.isfolder) ~= "function" or not env.isfolder(profileFolder) then env.makefolder(profileFolder) end
+    end)
+    fileReady = ok
+end
+profileState:Set(fileReady and "Device" or "This session")
+local function profileName()
+    local name = nameBox.Text:match("^%s*(.-)%s*$")
+    if #name < 1 or #name > 32 or not name:match("^[%w _%-]+$") then
+        UI:Notify("Use 1–32 letters, numbers, spaces, - or _."); return nil
+    end
+    return name
+end
+local function validMenuKey(name)
+    if type(name) ~= "string" or name:match("^Button") or name:match("^DPad")
+        or name:match("^Thumbstick") or name:match("^Mouse") then return nil end
+    local ok, key = pcall(function() return Enum.KeyCode[name] end)
+    if ok and key and key ~= Enum.KeyCode.Unknown and key ~= Enum.KeyCode.Escape and key ~= Enum.KeyCode.End and key ~= Enum.KeyCode.F6 then return key end
+    return nil
+end
+local function applyConfig(data)
+    if type(data) ~= "table" then return false end
+    if type(data.Theme) == "string" and themes[data.Theme] then UI:SetTheme(data.Theme) end
+    if type(data.Animations) == "boolean" then
+        config.Animations = data.Animations; animationToggle:Set(data.Animations, true)
+    end
+    if type(data.ShowMetrics) == "boolean" then UI:SetMetrics(data.ShowMetrics) end
+    if type(data.Scale) == "number" and data.Scale == data.Scale and data.Scale > -math.huge and data.Scale < math.huge then setScale(data.Scale) end
+    if type(data.MenuKey) == "string" then
+        local key = validMenuKey(data.MenuKey)
+        if key then config.MenuKey = key.Name end
+    end
+    capturingKey = false; refreshKey(); cancelOpenTween(); scale.Scale = uiScale; main.Visible = visible
+    return true
+end
+button(profileRow, "Save", 0, 2, 92, 36, function()
+    local name = profileName(); if not name then return end
+    local data = {Version = 1, Settings = UI:GetConfig()}; if UI.ProfileExtension then data.Game = UI.ProfileExtension.Get() end
+    if fileReady then
+        local ok = pcall(function() env.writefile(profileFolder .. "/" .. name:lower() .. ".json", HttpService:JSONEncode(data)) end)
+        if not ok then UI:Notify("Could not save this profile to your device."); return end
+        UI:Notify("Profile saved: " .. name)
+    else
+        memoryProfiles[name:lower()] = data; UI:Notify("Profile saved for this session: " .. name)
+    end
+end).Position = UDim2.new(1, -198, 0, 2)
+button(profileRow, "Load", 0, 2, 92, 36, function()
+    local name = profileName(); if not name then return end
+    local data
+    if fileReady then
+        local ok, value = pcall(function()
+            local readOK, raw = pcall(env.readfile, profileFolder .. "/" .. name:lower() .. ".json")
+            if not readOK then raw = env.readfile(profileFolder .. "/" .. name .. ".json") end
+            return HttpService:JSONDecode(raw)
+        end)
+        if not ok then UI:Notify("This profile could not be opened."); return end
+        data = value
+    else data = memoryProfiles[name:lower()] end
+    if type(data) ~= "table" or data.Version ~= 1 or not applyConfig(data.Settings) then
+        UI:Notify("Profile not found or not supported."); return
+    end
+    if UI.ProfileExtension and type(data.Game) == "table" then local ok, err = pcall(UI.ProfileExtension.Apply, data.Game); if not ok then warn("NoLimit profile: " .. tostring(err)) end end; UI:Notify("Profile loaded: " .. name)
+end).Position = UDim2.new(1, -96, 0, 2)
+
+local session = settings:AddSection("Session", "You are always in control.")
+session:AddButton({Title = "Reset interface", Description = "Restore the default look and shortcuts.", Text = "Reset",
+    Callback = function()
+        applyConfig({Theme = "Mint", MenuKey = "RightShift", Scale = 1, ShowMetrics = false, Animations = true})
+        fitWindow(true); UI:Notify("Interface settings reset.")
+    end})
+session:AddButton({Title = "Close NoLimit", Description = "Remove the interface and its listeners.", Text = "Close interface",
+    Callback = function() UI:Destroy() end})
+
+connect(UIS.InputBegan, function(input, processed)
+    if destroyed or input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.End and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
+        UI:Destroy(); return
+    end
+    if UIS:GetFocusedTextBox() then return end
+    if capturingKey then
+        if key == Enum.KeyCode.Escape then capturingKey = false; refreshKey(); return end
+        if key == Enum.KeyCode.Unknown or key == Enum.KeyCode.End or key == Enum.KeyCode.F6 then UI:Notify("Choose a different shortcut."); return end
+        if not validMenuKey(key.Name) then UI:Notify("Choose a keyboard shortcut."); return end
+        config.MenuKey = key.Name; capturingKey = false; refreshKey(); return
+    end
+    if not processed and key.Name == config.MenuKey then UI:SetVisible(not visible); refreshKey() end
+end)
+
+local elapsed, frames, frameTime = 0, 0, 0
+connect(RunService.RenderStepped, function(dt)
+    if config.Animations and visible and selected == "overview" then
+        local t = os.clock()
+        heroGlow.BackgroundTransparency = .68 + math.sin(t * .8) * .08
+        for i, star in ipairs(heroStars) do star.BackgroundTransparency = .28 + math.sin(t * .7 + i) * .16 end
+    end
+    elapsed = elapsed + dt
+    if config.ShowMetrics then frames = frames + 1; frameTime = frameTime + dt end
+    if elapsed < .5 then return end
+    elapsed = 0
+    sessionSeconds = math.floor(os.clock() - startedAt)
+    if visible and selected == "overview" then
+        statValues[1].Text = string.format("%02d:%02d", math.floor(sessionSeconds / 60), sessionSeconds % 60)
+    end
+    if config.ShowMetrics then
+        fpsLabel.Text = tostring(math.floor(frames / math.max(.001, frameTime) + .5)) .. " FPS"
+        frames, frameTime = 0, 0
+        local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        pingLabel.Text = ok and type(ping) == "number" and string.format("%.0f ms", ping) or "— ms"
+    else frames, frameTime = 0, 0 end
+end)
+connect(root:GetPropertyChangedSignal("AbsoluteSize"), function()
+    cancelOpenTween(); fitWindow(false); main.Visible = visible
+end)
+
+local guiBeingDestroyed = false
+function UI:Destroy()
+    if destroyed then return end
+    destroyed, visible, drag, capturingKey = true, false, nil, false
+    toastToken = toastToken + 1; cancelOpenTween()
+    for i = #extensionCleanups, 1, -1 do
+        local ok, err = pcall(extensionCleanups[i])
+        if not ok then warn("NoLimit cleanup: " .. tostring(err)) end
+    end
+    table.clear(extensionCleanups)
+    if toastTask then pcall(task.cancel, toastTask); toastTask = nil end
+    if initialFitTask then pcall(task.cancel, initialFitTask); initialFitTask = nil end
+    for _, c in ipairs(connections) do c:Disconnect() end
+    table.clear(connections)
+    for _, tw in pairs(activeTweens) do tw:Cancel() end
+    table.clear(activeTweens); table.clear(bindings); table.clear(themeRefreshers); table.clear(tooltipHelp)
+    if env.NoLimitThrowFoodUI == self then env.NoLimitThrowFoodUI = nil end
+    if not guiBeingDestroyed then gui:Destroy() end
+end
+disposer.OnInvoke = function() UI:Destroy() end
+connect(gui.Destroying, function()
+    guiBeingDestroyed = true
+    if not destroyed then UI:Destroy() end
+end)
+
+if type(getgenv) == "function" then env.NoLimitThrowFoodUI = UI end
+UI:SelectPage("overview"); refreshKey(); refreshTheme(); fitWindow(true)
+initialFitTask = task.defer(function()
+    initialFitTask = nil
+    if not destroyed then fitWindow(true) end
+end)
+
+;(function()
+local Planner = (function()
+-- Pure decision rules. No Roblox services or network calls.
+local Planner = {}
+function Planner.isFinite(n)
+    return type(n) == "number" and n == n and n > -math.huge and n < math.huge
+end
+function Planner.nextUpgrade(snapshot, configs, order, enabled, reserve)
+    if type(snapshot) ~= "table" or type(configs) ~= "table" or type(snapshot.OwnedFoods) ~= "table" then return nil end
+    local money = tonumber(snapshot.Money) or 0
+    if not Planner.isFinite(money) or not Planner.isFinite(reserve or 0) then return nil end
+    local available = math.max(0, money - math.max(0, reserve or 0))
+    for _, kind in ipairs(order) do
+        if enabled[kind] then
+            local nextIndex
+            if kind == "Food" then
+                local highest = 0
+                for i = 1, configs.Food.Count() do
+                    if snapshot.OwnedFoods[tostring(i)] == true or snapshot.OwnedFoods[i] == true then highest = i end
+                end
+                nextIndex = highest + 1
+            elseif kind == "Stand" then
+                if not Planner.isFinite(snapshot.Stand) or snapshot.Stand < 0 or snapshot.Stand % 1 ~= 0 then continue end
+                nextIndex = snapshot.Stand + 1
+            elseif kind == "Fence" then
+                if not Planner.isFinite(snapshot.FenceLevel) or snapshot.FenceLevel < 0 or snapshot.FenceLevel % 1 ~= 0 then continue end
+                nextIndex = snapshot.FenceLevel + 1
+            else continue end
+            local item = configs[kind].Get(nextIndex)
+            if item and Planner.isFinite(item.Price) and item.Price >= 0 and item.Price <= available then
+                return {Kind = kind, Index = nextIndex, Price = item.Price, Item = item}
+            end
+        end
+    end
+    return nil
+end
+function Planner.sellCandidates(animals, capacity, incomeOf, protectedNames)
+    -- Never sell before every plot slot is occupied. Compare with its weakest animal.
+    if type(animals) ~= "table" or not Planner.isFinite(capacity) or capacity < 1 or capacity % 1 ~= 0
+        or type(incomeOf) ~= "function" or type(protectedNames) ~= "table" then return {} end
+    local placed, weakest = 0, math.huge
+    for _, entry in pairs(animals) do
+        if type(entry) ~= "table" then return {} end
+        if entry.Placed == true then
+            local income = incomeOf(entry)
+            if not Planner.isFinite(income) or income < 0 then return {} end
+            placed = placed + 1; weakest = math.min(weakest, income)
+        end
+    end
+    if placed < capacity then return {} end
+    local result = {}
+    for id, entry in pairs(animals) do
+        local income = incomeOf(entry)
+        local name = tostring(entry.ModelName or ""):lower()
+        if type(entry.ModelName) == "string" and entry.ModelName ~= "" and entry.Placed == false and not entry.Bought and not entry.Favorite and not entry.Favorited
+            and not entry.Locked and not entry.Protected and not protectedNames[name]
+            and Planner.isFinite(income) and income >= 0 and income < weakest then
+            result[#result + 1] = {Id = id, Income = income, Entry = entry}
+        end
+    end
+    table.sort(result, function(a, b)
+        if a.Income == b.Income then return tostring(a.Id) < tostring(b.Id) end
+        return a.Income < b.Income
+    end)
+    return result
+end
+function Planner.previewAnimals(animals, capacity, incomeOf, protectedNames)
+    if type(animals) ~= "table" then return {} end
+    local eligible = {}
+    for _, candidate in ipairs(Planner.sellCandidates(animals, capacity, incomeOf, protectedNames)) do eligible[candidate.Id] = true end
+    local placed, weakest = 0, math.huge
+    local validCapacity = Planner.isFinite(capacity) and capacity >= 1 and capacity % 1 == 0
+    for _, entry in pairs(animals) do
+        if type(entry) == "table" and entry.Placed == true then
+            placed = placed + 1
+            local ok, income = pcall(incomeOf, entry)
+            if ok and Planner.isFinite(income) then weakest = math.min(weakest, income) end
+        end
+    end
+    local records = {}
+    for id, entry in pairs(animals) do
+        if type(entry) ~= "table" then continue end
+        local ok, income = pcall(incomeOf, entry)
+        if not ok or not Planner.isFinite(income) then income = nil end
+        local model = type(entry.ModelName) == "string" and entry.ModelName or "Unknown"
+        local reason
+        if eligible[id] then reason = "Weaker than every placed animal"
+        elseif entry.Placed == true then reason = "On your plot"
+        elseif entry.Bought then reason = "Purchased animal"
+        elseif protectedNames[model:lower()] then reason = "Never-sell list"
+        elseif entry.Favorite or entry.Favorited or entry.Locked or entry.Protected then reason = "Favorite / locked"
+        elseif not validCapacity then reason = "Capacity unavailable"
+        elseif placed < capacity then reason = "Empty plot slots"
+        elseif not income or type(entry.ModelName) ~= "string" or entry.Placed ~= false then reason = "Data unavailable"
+        elseif income >= weakest then reason = "Keep: equal or stronger"
+        else reason = "Waiting for valid plot data" end
+        records[#records + 1] = {Id = id, ModelName = model, Income = income,
+            Eligible = eligible[id] == true, Reason = reason, Placed = entry.Placed == true}
+    end
+    table.sort(records, function(a, b)
+        if a.Eligible ~= b.Eligible then return a.Eligible end
+        if a.ModelName ~= b.ModelName then return a.ModelName < b.ModelName end
+        return tostring(a.Id) < tostring(b.Id)
+    end)
+    return records
+end
+return Planner
+
+end)()
+local FinalExtras = (function()
+-- Read-only views, protection selection, goals and compact controls.
+-- A separate function keeps the unoptimized register frame small.
+return function(ctx)
+    local UI, opts = ctx.UI, ctx.Options
+    local create, label, button = ctx.Create, ctx.Label, ctx.Button
+    local colors, themes, config = ctx.Colors, ctx.Themes, ctx.Config
+    local connect, round, border = ctx.Connect, ctx.Round, ctx.Border
+    local active, compact, selectedPage, previewPage = true, false, 1, 1
+    local lastView, lastRecords, pickerNames, pickerQuery = nil, {}, {}, ""
+    local liveValues, protectSlots, previewSlots = {}, {}, {}
+    local extras = {}
+    local function help(obj, text)
+        if UI.AttachTooltip then UI:AttachTooltip(obj, text) end
+    end
+    local function accent() return themes[config.Theme].accent end
+    local function theme() return themes[config.Theme] end
+    local function textBox(parent, name, placeholder, x, y, width, height)
+        local field = create("TextBox", {Name = name, Text = "", PlaceholderText = placeholder,
+            ClearTextOnFocus = false, BackgroundColor3 = colors.bg, BorderSizePixel = 0,
+            Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(width, height),
+            Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = colors.text,
+            PlaceholderColor3 = colors.faint}, parent)
+        round(field, 8); border(field)
+        return field
+    end
+
+    -- Live values remain unknown until a real game-data connection exists.
+    local live = create("Frame", {Name = "LiveOverview", Size = UDim2.new(1, -6, 0, 104),
+        BackgroundColor3 = colors.surface, BorderSizePixel = 0, LayoutOrder = 1}, ctx.Overview.Frame)
+    round(live, 12); border(live)
+    label(live, "FIELD TELEMETRY", 18, 9, 340, 15, 9, colors.muted, true)
+    local read = button(live, "Read live data", 0, 8, 100, 24, ctx.ConnectGame)
+    read.Position = UDim2.new(1, -116, 0, 8)
+    help(read, "Read your current values without enabling farming, upgrades or sales.")
+    for i, name in ipairs({"CASH", "THROW POWER", "FOOD", "PLOT SLOTS"}) do
+        local cell = create("Frame", {BackgroundTransparency = 1,
+            Position = UDim2.new((i - 1) / 4, 14, 0, 38), Size = UDim2.new(.25, -22, 0, 58)}, live)
+        local heading = label(cell, name, 0, 0, 130, 14, 9, colors.faint, true)
+        heading.Size = UDim2.new(1, 0, 0, 14)
+        liveValues[i] = label(cell, "—", 0, 20, 140, 27, 18, colors.text, true)
+        liveValues[i].Size = UDim2.new(1, 0, 0, 27)
+        help(cell, ({"Current game balance.", "Current throw power, when available from the game.",
+            "Your currently equipped food.", "Placed animals / available plot slots."})[i])
+    end
+    ctx.StatHost.LayoutOrder = 2
+    for _, child in ipairs(ctx.Overview.Frame:GetChildren()) do
+        if child:IsA("GuiObject") and child ~= live and child ~= ctx.StatHost and child.LayoutOrder == 2 then
+            child.LayoutOrder = 3
+        end
+    end
+    ctx.Summary.Frame.LayoutOrder = 4
+
+    -- The picker uses a fixed row pool, not a fresh listener for every inventory update.
+    ctx.ProtectRow.Visible = false
+    ctx.ProtectSection:AddButton({Title = "Advanced name list", Description = "Optional text entry for names not in the collection.",
+        Text = "Show / hide", Callback = function() ctx.ProtectRow.Visible = not ctx.ProtectRow.Visible end})
+    ctx.ProtectSection:AddButton({Title = "Read collection", Description = "Load animal data without enabling Auto Sell.", Text = "Refresh list",
+        Callback = function() ctx.ConnectGame(); extras.Refresh(true) end})
+    local pickerRow = ctx.ProtectSection:Row("", nil, 402)
+    local search = textBox(pickerRow, "ProtectSearch", "Search your animals…", 0, 0, 500, 32)
+    search.Size = UDim2.new(1, 0, 0, 32)
+    local pickerCount = label(pickerRow, "Read live data to select animals.", 0, 38, 620, 18, 10, colors.muted)
+    pickerCount.Size = UDim2.new(1, 0, 0, 18)
+    local pickerPrevious = button(pickerRow, "←", 0, 368, 40, 28)
+    local pickerNext = button(pickerRow, "→", 48, 368, 40, 28)
+    local pickerPageLabel = label(pickerRow, "1 / 1", 102, 368, 220, 28, 10, colors.muted)
+    for i = 1, 8 do
+        local b = button(pickerRow, "", 0, 61 + (i - 1) * 37, 620, 32)
+        b.Name = "ProtectSlot" .. i; b.Size = UDim2.new(1, 0, 0, 32)
+        local name = label(b, "", 12, 0, 460, 32, 12, colors.text)
+        name.Size = UDim2.new(1, -144, 1, 0)
+        local status = label(b, "", 0, 0, 120, 32, 10, colors.muted, true)
+        status.Position = UDim2.new(1, -132, 0, 0); status.TextXAlignment = Enum.TextXAlignment.Right
+        protectSlots[i] = {Button = b, Name = name, Status = status}
+        connect(b.Activated, function()
+            local model = b:GetAttribute("ModelName")
+            if type(model) == "string" then
+                local protected = ctx.GetProtected()
+                extras.SetProtected(model, not protected[model:lower()])
+            end
+        end)
+        help(b, "Protect or unprotect every copy of this animal model. Built-in purchase and lock protection still applies.")
+    end
+
+    local previewSection = ctx.Animals:AddSection("Sale preview", "Read-only. These are the same rules Auto Sell checks again before every sale.")
+    local previewRow = previewSection:Row("", nil, 398)
+    local previewTitle = label(previewRow, "No game data yet", 0, 0, 620, 22, 12, colors.text, true)
+    previewTitle.Size = UDim2.new(1, 0, 0, 22)
+    for i = 1, 6 do
+        local row = create("Frame", {Name = "SalePreviewSlot" .. i, BackgroundColor3 = colors.raised,
+            BorderSizePixel = 0, Position = UDim2.fromOffset(0, 32 + (i - 1) * 54),
+            Size = UDim2.new(1, 0, 0, 48)}, previewRow)
+        round(row, 8)
+        local name = label(row, "", 12, 4, 400, 20, 12, colors.text, true)
+        name.Size = UDim2.new(1, -150, 0, 20)
+        local reason = label(row, "", 12, 26, 500, 15, 10, colors.muted)
+        reason.Size = UDim2.new(1, -24, 0, 15)
+        local income = label(row, "", 0, 4, 130, 20, 11, colors.text)
+        income.Position = UDim2.new(1, -142, 0, 4); income.TextXAlignment = Enum.TextXAlignment.Right
+        previewSlots[i] = {Frame = row, Name = name, Reason = reason, Income = income}
+    end
+    local previewPrevious = button(previewRow, "←", 0, 364, 40, 28)
+    local previewNext = button(previewRow, "→", 48, 364, 40, 28)
+    local previewPageLabel = label(previewRow, "1 / 1", 102, 364, 300, 28, 10, colors.muted)
+
+    local goals = ctx.Farming:AddSection("Session goals", "Pause all future automated actions when either target is reached. Zero disables a target.")
+    local goalState = goals:AddStatus("Goal status", "Off")
+    local goalToggle = goals:AddToggle({Id = "Goals", Title = "Pause at a goal", Default = false,
+        Description = "Targets refer to completed session throws and your current balance.",
+        Help = "Reaching either target pauses the whole scheduler before the next buy, sale, training phase or throw.",
+        Callback = function(value)
+            opts.Goals = value
+            if value then ctx.ConnectGame() end
+        end})
+    local goalFields = {}
+    for _, d in ipairs({{"GoalThrows", "Completed throws", "Session total, for example 100."}, {"GoalMoney", "Money target", "Current balance, for example 1e6."}}) do
+        local row = goals:Row(d[2], d[3])
+        local field = textBox(row, d[1], "0 = off", 0, 10, 144, 34)
+        field.Position = UDim2.new(1, -144, 0, 10); field.Text = "0"
+        goalFields[d[1]] = field
+        connect(field.FocusLost, function()
+            local value = tonumber(field.Text)
+            if ctx.Finite(value) then opts[d[1]] = math.clamp(math.floor(value), 0, d[1] == "GoalThrows" and 1e7 or 1e30) end
+            field.Text = tostring(opts[d[1]])
+            extras.Refresh()
+        end)
+    end
+
+    -- Compact mode reuses the existing options and scheduler. It is not a second UI instance.
+    local mini = create("Frame", {Name = "MiniWindow", BackgroundColor3 = colors.sidebar, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(360, 202), Position = UDim2.new(1, -388, 1, -232), Visible = false}, ctx.Root)
+    round(mini, 14); border(mini)
+    local rail = create("Frame", {BackgroundColor3 = accent(), BorderSizePixel = 0,
+        Position = UDim2.fromOffset(18, 0), Size = UDim2.new(1, -36, 0, 2)}, mini)
+    ctx.Crown(mini, 12, 11, 30)
+    label(mini, "NoLimit", 50, 11, 170, 23, 17, colors.text, true)
+    label(mini, "SESSION CONTROL", 50, 35, 190, 12, 8, colors.faint, true)
+    local miniDrag = create("Frame", {BackgroundTransparency = 1, Active = true,
+        Size = UDim2.new(1, -48, 0, 54)}, mini)
+    connect(miniDrag.InputBegan, function(input) ctx.BeginDrag(mini, input) end)
+    local miniClose = button(mini, "×", 316, 11, 30, 28, function()
+        extras.SetCompact(false); UI:SetVisible(false)
+    end)
+    miniClose.Name = "CompactHide"
+    help(miniClose, "Hide this compact window. The crown launcher can reopen your dashboard.")
+    local miniStatus = label(mini, "Stopped", 18, 62, 324, 20, 12, colors.text, true)
+    local miniValues = label(mini, "— cash  ·  0 throws  ·  00:00", 18, 92, 324, 23, 11, colors.muted)
+    local miniDetail = label(mini, "No data connected", 18, 119, 324, 15, 10, colors.faint)
+    local miniPause = button(mini, "Pause all", 18, 155, 148, 32, function() ctx.Pause(not ctx.IsPaused()) end, true)
+    miniPause.Name = "CompactPause"
+    local reopen = button(mini, "Open dashboard", 178, 155, 164, 32, function() UI:SetVisible(true) end)
+    reopen.Name = "CompactOpen"
+    help(miniPause, "Same Pause All control as Settings and F6. Active throws finish their regular cleanup.")
+    local compactToggle
+    compactToggle = ctx.Controls:AddToggle({Id = "Compact", Title = "Compact mode", Description = "Keep status and Pause All in a small draggable window.",
+        Callback = function(value) extras.SetCompact(value) end})
+    local originalVisible = UI.SetVisible
+    function UI:SetVisible(value)
+        if not active then return originalVisible(self, value) end
+        if value == true then
+            compact = false; mini.Visible = false
+            compactToggle:Set(false, true)
+        end
+        originalVisible(self, value)
+        if value ~= true and compact then mini.Visible = true; ctx.Launcher.Visible = false end
+    end
+    function extras.SetCompact(value)
+        if not active then return false end
+        compact = value == true; compactToggle:Set(compact, true)
+        if compact then
+            UI:SetVisible(false)
+            -- Convert its initial scale-based position to a clamped screen offset.
+            mini.Position = UDim2.fromOffset(mini.AbsolutePosition.X - ctx.Root.AbsolutePosition.X,
+                mini.AbsolutePosition.Y - ctx.Root.AbsolutePosition.Y)
+            ctx.Clamp(mini, 360, 202)
+        else mini.Visible = false; UI:SetVisible(true) end
+        return true
+    end
+    function extras.IsCompact() return compact and active end
+    function extras.SetProtected(name, value)
+        if not active or type(name) ~= "string" then return false end
+        name = name:match("^%s*(.-)%s*$")
+        if #name == 0 or #name > 100 or name:find(",", 1, true) then return false end
+        ctx.SetProtected(name, value == true); extras.Refresh(true)
+        return true
+    end
+    function extras.SetGoals(data)
+        if not active or type(data) ~= "table" then return false end
+        if ctx.Finite(data.Throws) then opts.GoalThrows = math.clamp(math.floor(data.Throws), 0, 1e7) end
+        if ctx.Finite(data.Money) then opts.GoalMoney = math.clamp(math.floor(data.Money), 0, 1e30) end
+        opts.Goals = type(data.Enabled) == "boolean" and data.Enabled or (opts.GoalThrows > 0 or opts.GoalMoney > 0)
+        if data.Enabled == false then opts.Goals = false end
+        goalToggle:Set(opts.Goals, true)
+        goalFields.GoalThrows.Text = tostring(opts.GoalThrows); goalFields.GoalMoney.Text = tostring(opts.GoalMoney)
+        if opts.Goals then ctx.ConnectGame() end
+        extras.Refresh(); return true
+    end
+    function extras.GetGoalState()
+        local reached = false
+        if opts.Goals then
+            local cash = ctx.Get("Money")
+            reached = (opts.GoalThrows > 0 and ctx.Stats.Throws >= opts.GoalThrows)
+                or (opts.GoalMoney > 0 and ctx.Finite(cash) and cash >= opts.GoalMoney)
+        end
+        return {Enabled = opts.Goals, Throws = opts.GoalThrows, Money = opts.GoalMoney, Reached = reached == true}
+    end
+    function extras.GetLiveData()
+        return ctx.Live()
+    end
+    function extras.GetSalePreview()
+        return ctx.Preview()
+    end
+    function extras.Refresh(forceCollection)
+        if not active then return end
+        lastView = extras.GetLiveData()
+        liveValues[1].Text = ctx.Number(lastView.Money)
+        liveValues[2].Text = ctx.Number(lastView.ThrowPower)
+        liveValues[3].Text = lastView.Food or "—"
+        liveValues[4].Text = lastView.Capacity and (tostring(lastView.Placed) .. " / " .. tostring(lastView.Capacity)) or "—"
+        if forceCollection or (UI:IsVisible() and ctx.Animals.Frame.Visible) then
+        lastRecords = extras.GetSalePreview()
+        local protected = ctx.GetProtected()
+        local names = {}
+        for _, r in ipairs(lastRecords) do names[r.ModelName:lower()] = r.ModelName end
+        for name in pairs(protected) do if not names[name] then names[name] = name end end
+        pickerNames = {}
+        for _, name in pairs(names) do if name:lower():find(pickerQuery, 1, true) then pickerNames[#pickerNames + 1] = name end end
+        table.sort(pickerNames, function(a, b) return a:lower() < b:lower() end)
+        local pages = math.max(1, math.ceil(#pickerNames / 8)); selectedPage = math.clamp(selectedPage, 1, pages)
+        pickerCount.Text = lastView.Connected and (#pickerNames .. " animal models  ·  click to protect all copies") or "Use Refresh list to read your collection."
+        pickerPageLabel.Text = selectedPage .. " / " .. pages
+        for i, slot in ipairs(protectSlots) do
+            local name = pickerNames[(selectedPage - 1) * 8 + i]
+            slot.Button.Visible = name ~= nil; slot.Button:SetAttribute("ModelName", name)
+            if name then
+                local chosen = protected[name:lower()] == true
+                slot.Name.Text = name; slot.Status.Text = chosen and "✓  PROTECTED" or "+  Protect"
+                slot.Status.TextColor3 = chosen and accent() or colors.muted
+                slot.Button.BackgroundColor3 = chosen and theme().tint or colors.raised
+            end
+        end
+        local eligible = 0; for _, record in ipairs(lastRecords) do if record.Eligible then eligible = eligible + 1 end end
+        previewTitle.Text = not lastView.Connected and "Read your collection to preview sales" or #lastRecords == 0 and "No animals loaded"
+            or (eligible .. " eligible  /  " .. #lastRecords .. " total · read-only preview")
+        local previewPages = math.max(1, math.ceil(#lastRecords / 6)); previewPage = math.clamp(previewPage, 1, previewPages)
+        previewPageLabel.Text = previewPage .. " / " .. previewPages
+        for i, slot in ipairs(previewSlots) do
+            local record = lastRecords[(previewPage - 1) * 6 + i]
+            slot.Frame.Visible = record ~= nil
+            if record then
+                slot.Name.Text = record.ModelName; slot.Income.Text = ctx.Number(record.Income) .. " income"
+                slot.Reason.Text = (record.Eligible and "SELL ELIGIBLE · " or "KEEP · ") .. record.Reason
+                slot.Reason.TextColor3 = record.Eligible and accent() or colors.muted
+            end
+        end
+        end
+        local goal = extras.GetGoalState()
+        goalState:Set(not goal.Enabled and "Off" or goal.Reached and "Target reached · paused" or "Armed · first reached target wins")
+        local activity = ctx.Activity()
+        miniStatus.Text = activity
+        local elapsed = math.max(0, math.floor(os.clock() - ctx.StartedAt))
+        miniValues.Text = ctx.Number(lastView.Money) .. " cash  ·  " .. ctx.Stats.Throws .. " throws  ·  " .. string.format("%02d:%02d", math.floor(elapsed / 60), elapsed % 60)
+        miniDetail.Text = "Power " .. ctx.Number(lastView.ThrowPower) .. "  ·  " .. ctx.Number(lastView.IncomeRate) .. " /s"
+        miniPause.Text = ctx.IsPaused() and "Resume all" or "Pause all"
+        miniPause.BackgroundColor3 = accent(); rail.BackgroundColor3 = accent()
+    end
+    connect(search:GetPropertyChangedSignal("Text"), function()
+        pickerQuery = search.Text:lower():sub(1, 100); selectedPage = 1; extras.Refresh(true)
+    end)
+    connect(pickerPrevious.Activated, function() selectedPage = math.max(1, selectedPage - 1); extras.Refresh(true) end)
+    connect(pickerNext.Activated, function() selectedPage = selectedPage + 1; extras.Refresh(true) end)
+    connect(previewPrevious.Activated, function() previewPage = math.max(1, previewPage - 1); extras.Refresh(true) end)
+    connect(previewNext.Activated, function() previewPage = previewPage + 1; extras.Refresh(true) end)
+    local originalSelect = UI.SelectPage
+    function UI:SelectPage(id)
+        local result = originalSelect(self, id)
+        if result and id == "animals" then extras.Refresh(true) end
+        return result
+    end
+    connect(ctx.Root:GetPropertyChangedSignal("AbsoluteSize"), function()
+        if compact then ctx.Clamp(mini, 360, 202) end
+    end)
+    local dtSum = 0
+    connect(ctx.RunService.Heartbeat, function(dt)
+        dtSum = dtSum + dt
+        if dtSum >= .5 then
+            dtSum = 0
+            if UI:IsVisible() or compact then extras.Refresh() end
+        end
+    end)
+    ctx.ThemeRefreshers[#ctx.ThemeRefreshers + 1] = function() extras.Refresh(true) end
+    UI:AddCleanup(function() active = false; compact = false end)
+    extras.Refresh(true)
+    return extras
+end
+
+end)()
+-- Integrated below the UI, inside its existing scope.
+do
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local alive, paused, loading, ready = true, false, false, false
+local modules, switches, moduleError = {}, {}, nil
+local opts = {Farm = false, Equip = false, Upgrade = false, Sell = false, AntiAFK = false, Offline = false,
+    Perfect = false, Cycle = false, Food = true, Stand = true, Fence = true,
+    Reserve = 0, TrainingSeconds = 60, ThrowsPerCycle = 5, Priority = 1,
+    Goals = false, GoalThrows = 0, GoalMoney = 0}
+local priorityOrders = {{"Food", "Stand", "Fence"}, {"Stand", "Food", "Fence"}, {"Fence", "Food", "Stand"}}
+local stats = {Throws = 0, Animals = 0, Sales = 0, SaleMoney = 0, Upgrades = 0, Perfect = 0}
+local knownAnimals, lastCash, cashStart, cashNow = {}, nil, nil, nil
+local ownThrow, ownTraining, trainDeadline, trainStopAsked = false, false, 0, false
+local phase, cycleThrows, worker, inFlight, timedOut = "Training", 0, nil, nil, false
+local actionAfter, lastEquip, lastFailure = 0, nil, {}
+local backoff = {}; local pauseButton, offlineStatus
+local loadingStarted, loadingWarned = 0, false
+local farmFailures = 0
+local protectedNames, logEntries = {}, {}
+local offlineAfter = 0
+local meterConnection, schedulerConnection, finishConnection, idleConnection
+local currentMarker, sentAt, scoreSent = nil, -math.huge, nil
+local inputFailed, soldIds, pendingUpgrade = false, {}, nil
+local throwThread, trainingThread, throwStarted, trainingStarted, stopRequestedAt, closingAt, cancelledNative
+local inputFailedAt, observedSequence
+local extras, plotCapacity, checkGoals
+local function stopTraining()
+    if not ownTraining or not ready or trainStopAsked then return end
+    trainStopAsked = true; stopRequestedAt = os.clock()
+    pcall(modules.Train.Stop)
+end
+local inputService
+pcall(function() inputService = game:GetService("VirtualInputManager") end)
+
+local farming = UI.Pages.farming; farming:ClearPlaceholder()
+local training = UI.Pages.training; training:ClearPlaceholder()
+local animals = UI.Pages.animals; animals:ClearPlaceholder()
+local rewards = UI.Pages.rewards; rewards:ClearPlaceholder()
+local upgrades = UI:AddPage("upgrades", "Upgrades", "Choose what comes next. Keep a little in reserve.", "↑")
+local activityPage = UI:AddPage("activity", "Activity", "The small steps behind your session.", "≡")
+local farmSection = farming:AddSection("Farming", "Repeat the regular throw and catch sequence.")
+local farmStatus = farmSection:AddStatus("Activity", "Stopped")
+local connStatus = farmSection:AddStatus("Game connection", "Connect when enabled")
+local trainingSection = training:AddSection("Farm cycle", "Alternate training and throws while Auto Farm is enabled.")
+local trainStatus = trainingSection:AddStatus("Cycle", "Off")
+local animalSection = animals:AddSection("Your collection", "Equip your best animals. Sell only weaker inventory animals.")
+local sellStatus = animalSection:AddStatus("Auto Sell", "Stopped")
+local upgradeSection = upgrades:AddSection("Auto upgrades", "Buy one affordable upgrade at a time, using game currency.")
+local upgradeStatus = upgradeSection:AddStatus("Activity", "Stopped")
+local controls = settings:AddSection("Automation controls", "Pause future actions while the current throw finishes.")
+local activity = activityPage:AddSection("Recent activity", "Latest actions first. Up to 10 entries are kept.")
+local logRows, logTimes = {}, {}
+for i = 1, 10 do
+    local row = activity:Row("", nil, 42)
+    logTimes[i] = label(row, "—", 0, 8, 60, 24, 10, colors.faint)
+    local text = label(row, "—", 72, 0, 500, 40, 11, colors.muted)
+    text.Size = UDim2.new(1, -72, 1, 0); text.TextWrapped = true; text.TextTruncate = Enum.TextTruncate.None
+    logRows[i] = {Set = function(_, value) text.Text = value end}
+end
+local summary = overview:AddSection("Session statistics", "Confirmed actions and changes observed during this session.")
+summary.Frame.LayoutOrder = 3
+local statRows = {}
+for _, entry in ipairs({{"Throws", "Completed throws"}, {"Animals", "Animals added"}, {"Sales", "Animals sold"},
+    {"SaleMoney", "Sale proceeds"}, {"Upgrades", "Upgrades bought"}, {"Perfect", "Perfect inputs completed"}}) do
+    statRows[entry[1]] = summary:AddStatus(entry[2], "0")
+end
+local cashStatus = summary:AddStatus("Net cash change", "—")
+statValues[3].Text = "7 controls"
+-- Replace the UI-only caption without changing the layout.
+for _, obj in ipairs(statHost:GetDescendants()) do
+    if obj:IsA("TextLabel") and obj.Text == "No features added yet" then obj.Text = "All start switched off" end
+end
+
+local function numberText(n)
+    if not Planner.isFinite(n) then return "—" end
+    for _, unit in ipairs({{1e24,"Sp"},{1e21,"Sx"},{1e18,"Qi"},{1e15,"Qa"},{1e12,"T"},{1e9,"B"},{1e6,"M"},{1e3,"K"}}) do
+        if math.abs(n) >= unit[1] then return string.format("%.2f%s", n / unit[1], unit[2]) end
+    end
+    return string.format("%.0f", n)
+end
+local function log(message)
+    if not alive then return end
+    table.insert(logEntries, 1, {Time = os.clock() - startedAt, Text = tostring(message)})
+    if #logEntries > 10 then table.remove(logEntries) end
+    for i, row in ipairs(logRows) do
+        local e = logEntries[i]; row:Set(e and e.Text or "—")
+        logTimes[i].Text = e and string.format("%02d:%02d", math.floor(e.Time / 60), math.floor(e.Time % 60)) or "—"
+    end
+end
+local function failOnce(key, text)
+    local now = os.clock()
+    if not lastFailure[key] or now - lastFailure[key] > 20 then
+        log(text); warn("[NoLimit] " .. text); lastFailure[key] = now
+    end
+end
+local function get(key, fallback)
+    if not ready then return fallback end
+    local ok, value = pcall(modules.Data.Get, modules.Data, key)
+    if ok and value ~= nil then return value end
+    return fallback
+end
+local function blocked()
+    local s = modules.State
+    return s.Busy or s.OfflineOpen or s.TutorialActive or s.ShopOpen or s.ExclusiveShopOpen
+        or s.IndexOpen or s.AnimalsOpen or s.SellOpen or s.InventoryOpen or s.ProtectedSellOpen
+        or s.PackOfferShowing or s.ReleaseShow
+end
+local function setOff(key)
+    opts[key] = false
+    if switches[key] then switches[key]:Set(false, true) end
+end
+local function detach()
+    for _, c in pairs({meterConnection, schedulerConnection, finishConnection, idleConnection}) do
+        if c then c:Disconnect() end
+    end
+end
+local function pause(value)
+    if not alive then return end
+    paused = value == true
+    if pauseButton then pauseButton.Text = paused and "Resume all" or "Pause all" end
+    if paused then stopTraining() end
+    if alive then farmStatus:Set(paused and "Paused · finishing current action" or "Ready"); log(paused and "All automations paused" or "Automations resumed") end
+end
+local function invoke(name, ...)
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local remote = remotes and remotes:FindFirstChild(name)
+    if not remote or not remote:IsA("RemoteFunction") then return {Ok = false, Reason = "Missing remote: " .. name} end
+    local ok, result = pcall(remote.InvokeServer, remote, ...)
+    if not ok then return {Ok = false, Reason = "Network error"} end
+    if type(result) ~= "table" or type(result.Ok) ~= "boolean" then return {Ok = false, Reason = "Bad response"} end
+    return result
+end
+local function perform(labelText, fn)
+    if inFlight or not alive or paused then return end
+    local token = {Name = labelText, Started = os.clock()}; inFlight = token
+    worker = task.spawn(function()
+        local key = ({Upgrade = "Upgrade", ["Equip food"] = "Upgrade", ["Equip best"] = "Equip",
+            ["Sell animal"] = "Sell", Throw = "Farm", ["Offline earnings"] = "Offline"})[labelText]
+        if not alive or paused or (checkGoals and checkGoals()) or (key and not opts[key]) then
+            if inFlight == token then inFlight = nil end
+            return
+        end
+        local ok, err = pcall(fn)
+        if alive and not ok then failOnce(labelText, labelText .. " failed: " .. tostring(err)) end
+        if inFlight == token then inFlight = nil end
+        actionAfter = math.max(actionAfter, os.clock() + 2)
+        if not alive and not ownThrow then detach() end
+    end)
+end
+local function connectGame()
+    if not alive or ready or loading then return end
+    if moduleError then UI:Notify(moduleError); return end
+    loading = true; loadingStarted = os.clock(); loadingWarned = false; connStatus:Set("Connecting…")
+    task.spawn(function()
+        local ok, err = pcall(function()
+            assert(game.PlaceId == 120219252362013, "This script is for Throw Food For Animals.")
+            local function load(parent, name)
+                local obj = parent and parent:FindFirstChild(name)
+                assert(obj and obj:IsA("ModuleScript"), "Missing module: " .. name)
+                return require(obj) -- Reuse the game's modules. Never call their Init functions.
+            end
+            local scripts = player:FindFirstChild("PlayerScripts")
+            local client = scripts and scripts:FindFirstChild("Client")
+            local controllers = client and client:FindFirstChild("Controllers")
+            assert(controllers, "Join Throw Food For Animals before enabling features.")
+            local configs = ReplicatedStorage:FindFirstChild("Config")
+            local shared = ReplicatedStorage:FindFirstChild("Shared")
+            local nativeData = load(controllers, "DataController")
+            assert(nativeData:IsReady(), "Player data is not ready in this module context. Rejoin and retry.")
+            local staged = {Data = nativeData, State = load(controllers, "ClientState"),
+                Throw = load(controllers, "ThrowController"), Train = load(controllers, "TrainingController"),
+                Food = load(configs, "FoodsConfig"), Stand = load(configs, "StandsConfig"),
+                Fence = load(configs, "FenceConfig"), Mutations = load(shared, "Mutations"),
+                Offline = load(controllers, "OfflineEarnings")}
+            assert(type(staged.Throw.Start) == "function" and type(staged.Train.Start) == "function"
+                and type(staged.Train.Stop) == "function" and type(staged.Train.IsRunning) == "function"
+                and type(staged.Offline.Claim) == "function" and type(staged.Offline.IsOpen) == "function", "Game controllers changed.")
+            assert(type(staged.Mutations.IncomeOf) == "function", "Animal income calculation unavailable.")
+            assert(staged.Data:IsReady(), "Player data is not ready in this module context. Rejoin and retry.")
+            if not alive then return end
+            modules = staged; ready = true
+            for id in pairs(get("Animals", {})) do knownAnimals[id] = true end
+            cashStart = cashStart or tonumber(get("Money", 0)) or 0
+            connStatus:Set("Connected"); log("Connected to game data")
+            if extras then extras.Refresh(true) end
+            if modules.Throw.Finished and type(modules.Throw.Finished.Connect) == "function" then
+                if finishConnection then finishConnection:Disconnect() end
+                finishConnection = modules.Throw.Finished:Connect(function()
+                    if alive then
+                        stats.Throws = stats.Throws + 1
+                        if scoreSent and scoreSent >= .92 then stats.Perfect = stats.Perfect + 1 end
+                        if ownThrow then cycleThrows = cycleThrows + 1 end
+                        log("Throw completed")
+                    end
+                    scoreSent = nil
+                end)
+            end
+        end)
+        loading = false
+        if not ok and alive then
+            moduleError = tostring(err); connStatus:Set("Not connected")
+            for _, key in ipairs({"Farm", "Equip", "Upgrade", "Sell", "Perfect", "Offline"}) do setOff(key) end
+            UI:Notify("Game connection failed. See Activity or F9 for details."); log(moduleError)
+            warn("[NoLimit] " .. moduleError)
+        end
+    end)
+end
+local function toggle(section, key, title, desc)
+    switches[key] = section:AddToggle({Id = key, Title = title, Description = desc, Default = opts[key],
+        Callback = function(value)
+            if value and (key == "Farm" or key == "Perfect" or key == "AntiAFK") and not inputService then
+                UI:Notify("Automatic throw input is unavailable in this environment."); return false
+            end
+            if value and moduleError and key ~= "AntiAFK" and key ~= "Cycle" then UI:Notify("Reconnect the game first."); return false end
+            opts[key] = value
+            if key == "Sell" and not value then sellStatus:Set("Stopped") end
+            if key == "Upgrade" and not value then upgradeStatus:Set("Stopped") end
+            if key == "Offline" and not value and offlineStatus then offlineStatus:Set("Stopped") end
+            if key == "Cycle" and not value then stopTraining() end
+            if key == "Farm" or key == "Perfect" then inputFailed = false end
+            if key == "Farm" then
+                cycleThrows = 0; phase = "Training"
+                if not value then stopTraining() end
+            end
+            if value and (key == "Farm" or key == "Perfect" or key == "Equip" or key == "Sell" or key == "Upgrade" or key == "Offline") then task.defer(connectGame) end
+            log(title .. (value and " enabled" or " disabled"))
+        end})
+end
+toggle(farmSection, "Farm", "Auto Farm", "Repeat regular throws. Finish the current throw when stopped.")
+toggle(farmSection, "Perfect", "Auto Perfect Throw", "Tap near the top of the meter, including your manual throws.")
+toggle(animalSection, "Equip", "Auto Equip Best", "Use the game's Equip Best action when the collection changes.")
+toggle(animalSection, "Sell", "Auto Sell", "Sell weaker inventory animals only when your plot is full.")
+toggle(upgradeSection, "Upgrade", "Auto Upgrade All", "Use the category choices and reserve below.")
+toggle(trainingSection, "Cycle", "Training & throw cycle", "With Auto Farm: train, then complete your chosen number of throws.")
+
+local numberFields = {}
+local function numberControl(section, key, title, desc, min, max, step)
+    local row = section:Row(title, desc)
+    local field = create("TextBox", {Text = tostring(opts[key]), ClearTextOnFocus = false,
+        BackgroundColor3 = colors.bg, TextColor3 = colors.text, Font = Enum.Font.Gotham,
+        TextSize = 12, BorderSizePixel = 0, Position = UDim2.new(1, -144, 0, 10), Size = UDim2.fromOffset(144, 34)}, row)
+    round(field, 8); border(field)
+    numberFields[key] = field
+    connect(field.FocusLost, function()
+        local value = tonumber(field.Text)
+        if Planner.isFinite(value) then opts[key] = math.clamp(math.floor(value / step + .5) * step, min, max) end
+        field.Text = tostring(opts[key])
+    end)
+    return field
+end
+numberControl(trainingSection, "TrainingSeconds", "Training duration", "Seconds per training phase (10–600).", 10, 600, 1)
+numberControl(trainingSection, "ThrowsPerCycle", "Throws per cycle", "Completed throws before the next training phase (1–100).", 1, 100, 1)
+numberControl(upgradeSection, "Reserve", "Money reserve", "Game currency to keep. Scientific notation is supported.", 0, 1e30, 1)
+for _, key in ipairs({"Food", "Stand", "Fence"}) do
+    toggle(upgradeSection, key, ({Food = "Food upgrades", Stand = "Training stand upgrades", Fence = "Fence upgrades"})[key], "Included when Auto Upgrade All is enabled.")
+end
+local priorityButton
+priorityButton = upgradeSection:AddButton({Title = "Upgrade priority", Description = "Try the next category if the first is not affordable.",
+    Text = "Food first", Callback = function()
+        opts.Priority = opts.Priority % 3 + 1
+        priorityButton.Text = priorityOrders[opts.Priority][1] .. " first"
+    end})
+local protectSection = animals:AddSection("Never sell", "Bought, placed, favorited and locked animals are always excluded.")
+local protectRow = protectSection:Row("Protected animal names", "Model names, separated by commas. Applies to all copies.", 94)
+local protectedBox = create("TextBox", {Name = "ProtectedAnimals", Text = "", PlaceholderText = "Example: Snail, Frog",
+    ClearTextOnFocus = false, BackgroundColor3 = colors.bg, BorderSizePixel = 0,
+    Position = UDim2.fromOffset(0, 54), Size = UDim2.new(1, 0, 0, 34), Font = Enum.Font.Gotham,
+    TextSize = 12, TextColor3 = colors.text, PlaceholderColor3 = colors.faint}, protectRow)
+round(protectedBox, 8); border(protectedBox)
+local function refreshProtectedNames()
+    local parsed = {}
+    for name in protectedBox.Text:gmatch("[^,]+") do
+        name = name:match("^%s*(.-)%s*$"):lower(); if name ~= "" then parsed[name] = true end
+    end
+    protectedNames = parsed; log("Never-sell list updated")
+end
+connect(protectedBox.FocusLost, refreshProtectedNames)
+local function animalIncome(entry)
+    if not ready then return nil end
+    local ok, value = pcall(modules.Mutations.IncomeOf, entry, player:GetAttribute("BestIncome") or 0)
+    return ok and value or nil
+end
+local function salePreview()
+    if not ready or not plotCapacity then return {} end
+    local records = Planner.previewAnimals(get("Animals", {}), plotCapacity(), animalIncome, protectedNames)
+    for _, record in ipairs(records) do
+        if soldIds[record.Id] then record.Eligible = false; record.Reason = "Sale acknowledged; waiting for game data" end
+    end
+    return records
+end
+local function liveData()
+    if not ready then return {Connected = false, Placed = 0} end
+    local money = get("Money")
+    local power = get("ThrowPower", get("Power", player:GetAttribute("ThrowPower")))
+    local foodIndex = get("EquippedFood")
+    local ok, food = pcall(modules.Food.Get, foodIndex)
+    local list, placed = get("Animals", {}), 0
+    if type(list) == "table" then
+        for _, entry in pairs(list) do if type(entry) == "table" and entry.Placed == true then placed = placed + 1 end end
+    end
+    local income = player:GetAttribute("IncomeRate")
+    return {Connected = true, Money = Planner.isFinite(money) and money or nil,
+        ThrowPower = Planner.isFinite(power) and power or nil,
+        Food = ok and type(food) == "table" and (food.Name or tostring(foodIndex)) or nil,
+        FoodIndex = foodIndex, Placed = placed, Capacity = plotCapacity and plotCapacity() or nil,
+        IncomeRate = Planner.isFinite(income) and income or nil, Level = get("Level")}
+end
+extras = FinalExtras({UI = UI, Options = opts, Create = create, Label = label, Button = button,
+    Colors = colors, Themes = themes, Config = config, Connect = connect, Round = round, Border = border,
+    Root = root, Crown = crown, BeginDrag = beginDrag, Clamp = clampFrame, Launcher = launcher,
+    Overview = overview, Farming = farming, Animals = animals, Controls = controls,
+    StatHost = statHost, Summary = summary, ProtectRow = protectRow, ProtectSection = protectSection,
+    ConnectGame = connectGame, Finite = Planner.isFinite, Number = numberText, StartedAt = startedAt,
+    RunService = RunService, ThemeRefreshers = themeRefreshers, Stats = stats, Get = get,
+    Live = liveData, Preview = salePreview, Pause = pause, IsPaused = function() return paused end,
+    Activity = function()
+        if paused then return "PAUSED · no new actions" end
+        if inFlight then return inFlight.Name end
+        if ownTraining then return "TRAINING" end
+        return opts.Farm and "READY FOR NEXT THROW" or "STOPPED"
+    end,
+    GetProtected = function() return table.clone(protectedNames) end,
+    SetProtected = function(name, value)
+        protectedNames[name:lower()] = value and true or nil
+        local names = {}; for model in pairs(protectedNames) do names[#names + 1] = model end
+        table.sort(names); protectedBox.Text = table.concat(names, ", ")
+        log((value and "Protected " or "Unprotected ") .. name)
+    end,
+})
+checkGoals = function()
+    if not alive or not extras then return false end
+    if extras.GetGoalState().Reached then
+        if not paused then
+            pause(true); log("Session goal reached; all new automated actions paused")
+            UI:Notify("Session goal reached. Automations paused.")
+        end
+        return true
+    end
+    return false
+end
+UI.ProfileExtension = {
+    Get = function()
+        local result = {ProtectedAnimals = protectedBox.Text}
+        for _, key in ipairs({"Cycle", "Food", "Stand", "Fence", "Reserve", "TrainingSeconds", "ThrowsPerCycle", "Priority", "Goals", "GoalThrows", "GoalMoney"}) do result[key] = opts[key] end
+        return result
+    end,
+    Apply = function(data)
+        if type(data) ~= "table" then return end
+        for _, key in ipairs({"Cycle", "Food", "Stand", "Fence"}) do
+            if type(data[key]) == "boolean" then opts[key] = data[key]; switches[key]:Set(data[key], true) end
+        end
+        for key, range in pairs({Reserve = {0, 1e30}, TrainingSeconds = {10, 600}, ThrowsPerCycle = {1, 100}, Priority = {1, 3}}) do
+            if Planner.isFinite(data[key]) then
+                opts[key] = math.clamp(math.floor(data[key]), range[1], range[2])
+                if numberFields[key] then numberFields[key].Text = tostring(opts[key]) end
+            end
+        end
+        priorityButton.Text = priorityOrders[opts.Priority][1] .. " first"
+        if type(data.ProtectedAnimals) == "string" and #data.ProtectedAnimals <= 2000 then
+            protectedBox.Text = data.ProtectedAnimals; refreshProtectedNames()
+        end
+        if data.GoalThrows ~= nil or data.GoalMoney ~= nil or data.Goals ~= nil then
+            extras.SetGoals({Throws = data.GoalThrows, Money = data.GoalMoney, Enabled = data.Goals})
+        end
+        extras.Refresh()
+    end,
+}
+protectSection:AddStatus("Sell rule", "Strictly below weakest placed")
+local offline = rewards:AddSection("Offline earnings", "Collect available earnings through the regular claim window.")
+toggle(offline, "Offline", "Auto Claim Offline Earnings", "Claim when the game's offline window is open.")
+offlineStatus = offline:AddStatus("Status", "Stopped")
+
+toggle(controls, "AntiAFK", "Anti-AFK", "Send an idle input when Roblox reports inactivity.")
+pauseButton = controls:AddButton({Title = "Pause All", Description = "Also available with F6, outside text fields.", Text = "Pause all",
+    Callback = function() pause(not paused) end})
+controls:AddButton({Title = "Stop All", Description = "Switch every automation off. Current throws finish normally.", Text = "Stop all",
+    Callback = function()
+        for _, key in ipairs({"Farm", "Equip", "Upgrade", "Sell", "Perfect", "AntiAFK", "Offline"}) do setOff(key) end
+        stopTraining()
+        paused = false; pauseButton.Text = "Pause all"
+        farmStatus:Set("Stopped"); sellStatus:Set("Stopped"); upgradeStatus:Set("Stopped"); offlineStatus:Set("Stopped")
+        log("All automations stopped")
+    end})
+controls:AddButton({Title = "Reconnect game", Description = "Retry after player data has finished loading.", Text = "Reconnect",
+    Callback = function()
+        if loading or inFlight or ownTraining or (ready and modules.State.Busy) then UI:Notify("Finish the current action before reconnecting."); return end
+        moduleError = nil; ready = false; connectGame()
+    end})
+connect(UIS.InputBegan, function(input, processed)
+    if input.KeyCode == Enum.KeyCode.F6 and not processed and not UIS:GetFocusedTextBox() and not capturingKey then
+        pause(not paused)
+    end
+end)
+
+local function tap(key)
+    if not inputService then return false, "unavailable" end
+    if UIS:GetFocusedTextBox() or UIS:IsKeyDown(key) then return false, "busy" end
+    local down = pcall(function() inputService:SendKeyEvent(true, key, false, game) end)
+    -- Always try to release the key, even when the press raised an error.
+    local up = pcall(function() inputService:SendKeyEvent(false, key, false, game) end)
+    return down and up, "unavailable"
+end
+idleConnection = player.Idled:Connect(function()
+    if alive and opts.AntiAFK and not paused and not UIS:GetFocusedTextBox() then
+        if tap(Enum.KeyCode.F15) then log("Idle input sent")
+        else failOnce("idle", "Anti-AFK input unavailable"); setOff("AntiAFK") end
+    end
+end)
+meterConnection = RunService.RenderStepped:Connect(function()
+    local seq = playerGui:FindFirstChild("ThrowSequence")
+    -- Observe every sequence, even when assistance is off, so cancelled throws
+    -- cannot donate a stale perfect-input score to a later manual throw.
+    if seq and seq ~= observedSequence then
+        observedSequence = seq; currentMarker = nil; scoreSent = nil
+    end
+    local shouldComplete = ownThrow
+    if inputFailed or (not shouldComplete and (not alive or paused or not opts.Perfect)) then return end
+    local meter = seq and seq:FindFirstChild("Meter")
+    local bar = meter and meter:FindFirstChild("Bar")
+    local marker = bar and bar:FindFirstChild("Marker")
+    if not marker or not marker.Visible or not meter.Visible then currentMarker = nil; return end
+    if marker ~= currentMarker then currentMarker = marker; sentAt = -math.huge; scoreSent = nil end
+    local score = 1 - marker.Position.Y.Scale
+    local target = opts.Perfect and .96 or .76
+    if score >= target and os.clock() - sentAt > 1.6 then
+        local ok, reason = tap(Enum.KeyCode.Space)
+        if ok then scoreSent = score; sentAt = os.clock()
+        elseif alive and reason ~= "busy" then
+            inputFailed = true; inputFailedAt = os.clock(); setOff("Perfect"); setOff("Farm")
+            UI:Notify("Automatic input failed. Complete the current throw manually.")
+            log("Automatic input unavailable; stopped farming")
+        end
+    end
+end)
+
+local function inventoryFingerprint(list)
+    local parts = {tostring(get("FenceLevel", 0)), tostring(player:GetAttribute("BestIncome") or 0)}
+    for id, e in pairs(list) do parts[#parts + 1] = tostring(id) .. ":" .. tostring(e.Placed) .. ":" .. tostring(e.ModelName) .. ":" .. tostring(e.Mutation) .. ":" .. tostring(e.Size) end
+    table.sort(parts); return table.concat(parts, "|")
+end
+plotCapacity = function()
+    local level = get("FenceLevel")
+    if not Planner.isFinite(level) or level < 0 or level % 1 ~= 0 then return nil end
+    local ok, capacity = pcall(modules.Fence.SlotsFor, level)
+    return ok and capacity or nil
+end
+local function observeData()
+    local list = get("Animals", {})
+    for id in pairs(list) do
+        if not knownAnimals[id] then knownAnimals[id] = true; stats.Animals = stats.Animals + 1 end
+    end
+    cashNow = tonumber(get("Money", 0)) or 0; lastCash = cashNow
+    for key, row in pairs(statRows) do row:Set(numberText(stats[key])) end
+    cashStatus:Set(cashStart and numberText(cashNow - cashStart) or "—")
+    return list
+end
+local function runStep()
+    if not ready or not alive then return end
+    local list = observeData()
+    if checkGoals() then return end
+    if paused or cancelledNative then return end
+    if inFlight then
+        if os.clock() - inFlight.Started > (ownThrow and 120 or ownTraining and opts.TrainingSeconds + 30 or 20) and not timedOut then
+            timedOut = true; pause(true); failOnce("timeout", "Action timed out; paused to avoid duplicate requests")
+        end
+        return
+    end
+    timedOut = false
+    if opts.Offline and modules.Offline.IsOpen() and os.clock() >= offlineAfter then
+        perform("Offline earnings", function()
+            modules.Offline.Claim()
+            offlineAfter = os.clock() + 10
+            if alive then
+                local done = not modules.Offline.IsOpen()
+                offlineStatus:Set(done and "Claim window completed" or "Waiting before retry")
+                if done then log("Offline earnings window completed") end
+            end
+        end)
+        return
+    end
+    if ownTraining then
+        if not modules.Train.IsRunning() then ownTraining = false
+        elseif os.clock() >= trainDeadline or not opts.Farm then
+            stopTraining()
+        end
+        return
+    end
+    if blocked() or UIS:GetFocusedTextBox() then farmStatus:Set("Waiting for game activity"); return end
+    if os.clock() < actionAfter then return end
+    local upgradeReady = true
+    if pendingUpgrade then
+        local matched
+        if pendingUpgrade.Kind == "Food" then
+            local owned = get("OwnedFoods", {})
+            matched = owned[tostring(pendingUpgrade.Index)] == true or owned[pendingUpgrade.Index] == true
+        else matched = (tonumber(get(pendingUpgrade.Kind == "Stand" and "Stand" or "FenceLevel", 0)) or 0) >= pendingUpgrade.Index end
+        if matched then pendingUpgrade = nil
+        elseif os.clock() - pendingUpgrade.Started > 12 then
+            setOff("Upgrade"); upgradeStatus:Set("Stopped: waiting for game data")
+            failOnce("pendingUpgrade", "Upgrade confirmation not replicated; stopped to prevent duplicate spending")
+            upgradeReady = false
+        else upgradeStatus:Set("Waiting for game data"); upgradeReady = false end
+    end
+    if opts.Upgrade and upgradeReady and os.clock() >= (backoff.Upgrade or 0) then
+        local snapshot = {Money = cashNow, OwnedFoods = get("OwnedFoods", {}), Stand = get("Stand", 0), FenceLevel = get("FenceLevel", 0)}
+        local item = Planner.nextUpgrade(snapshot, modules, priorityOrders[opts.Priority], opts, opts.Reserve)
+        if item then
+            perform("Upgrade", function()
+                local remote = ({Food = "Shop_Buy", Stand = "Stand_Upgrade", Fence = "Plot_UpgradeFence"})[item.Kind]
+                -- Recheck the reserve immediately before spending.
+                if (tonumber(get("Money", 0)) or 0) - item.Price < opts.Reserve then return end
+                local result = item.Kind == "Food" and invoke(remote, item.Index) or invoke(remote)
+                if result.Ok then
+                    pendingUpgrade = {Kind = item.Kind, Index = item.Index, Started = os.clock()}
+                    stats.Upgrades = stats.Upgrades + 1; log(item.Kind .. " upgraded"); upgradeStatus:Set(item.Kind .. " upgraded")
+                else
+                    failOnce("upgrade", "Upgrade refused: " .. tostring(result.Reason))
+                    backoff.Upgrade = os.clock() + 30; upgradeStatus:Set("Waiting before retry")
+                end
+            end); return
+        end
+        upgradeStatus:Set("Waiting for funds / maximum reached")
+        if opts.Food then
+            local owned, highest = get("OwnedFoods", {}), 0
+            for i = 1, modules.Food.Count() do if owned[tostring(i)] or owned[i] then highest = i end end
+            if highest > 0 and get("EquippedFood", 0) ~= highest and os.clock() >= (backoff.FoodEquip or 0) then
+                perform("Equip food", function()
+                    local r = invoke("Shop_Equip", highest)
+                    if r.Ok then log("Best owned food equipped") else failOnce("food", "Food equip refused: " .. tostring(r.Reason)) end
+                    backoff.FoodEquip = os.clock() + 30
+                end); return
+            end
+        end
+    end
+    if opts.Equip and os.clock() >= (backoff.Equip or 0) then
+        local fp = inventoryFingerprint(list)
+        if fp ~= lastEquip then
+            perform("Equip best", function()
+                local r = invoke("Plot_EquipBest")
+                if r.Ok then lastEquip = inventoryFingerprint(get("Animals", {})); log("Best animals equipped")
+                else failOnce("equip", "Equip Best refused: " .. tostring(r.Reason)) end
+                backoff.Equip = os.clock() + (r.Ok and 3 or 30)
+            end); return
+        end
+    end
+    if opts.Sell then
+        local candidates = Planner.sellCandidates(list, plotCapacity(), animalIncome, protectedNames)
+        for i = #candidates, 1, -1 do if soldIds[candidates[i].Id] then table.remove(candidates, i) end end
+        local candidate = candidates[1]
+        sellStatus:Set(candidate and ("Eligible: " .. #candidates) or "No eligible inventory animals")
+        if candidate then
+            perform("Sell animal", function()
+                -- Re-read all protection and placement conditions immediately before sale.
+                local fresh = Planner.sellCandidates(get("Animals", {}), plotCapacity(), animalIncome, protectedNames)
+                local stillEligible = false
+                for _, entry in ipairs(fresh) do if entry.Id == candidate.Id and not soldIds[entry.Id] then stillEligible = true; break end end
+                if not stillEligible then return end
+                local r = invoke("Plot_SellAnimal", candidate.Id)
+                if r.Ok then
+                    soldIds[candidate.Id] = true
+                    stats.Sales = stats.Sales + 1; stats.SaleMoney = stats.SaleMoney + (tonumber(r.Money) or 0)
+                    log("Sold " .. tostring(candidate.Entry.ModelName) .. " · " .. numberText(tonumber(r.Money) or 0))
+                else setOff("Sell"); sellStatus:Set("Stopped: " .. tostring(r.Reason)); log("Auto Sell stopped: " .. tostring(r.Reason)) end
+            end); return
+        end
+    end
+    if opts.Farm and os.clock() >= (backoff.Farm or 0) then
+        if opts.Cycle and (phase == "Training" or cycleThrows >= opts.ThrowsPerCycle) and (tonumber(get("Stand", 0)) or 0) > 0 then
+            phase = "Throws"; cycleThrows = 0; ownTraining = true; trainStopAsked = false; stopRequestedAt = nil
+            trainDeadline = os.clock() + opts.TrainingSeconds
+            trainStatus:Set("Training for " .. opts.TrainingSeconds .. "s")
+            -- Training.Start yields for the duration. It must not occupy the action lock,
+            -- because the scheduler needs to call Stop when the deadline expires.
+            task.spawn(function()
+                if not alive or paused or checkGoals() or not opts.Farm or not opts.Cycle then ownTraining = false; return end
+                trainingThread = coroutine.running(); trainingStarted = os.clock()
+                local ok, err = pcall(modules.Train.Start)
+                ownTraining = false; trainingThread = nil; trainingStarted = nil
+                if alive then
+                    if not ok then failOnce("training", "Training failed: " .. tostring(err)) end
+                    trainStatus:Set("Throw phase"); actionAfter = os.clock() + 2
+                else detach() end
+            end)
+            return
+        end
+        perform("Throw", function()
+            throwThread = coroutine.running(); throwStarted = os.clock(); inputFailedAt = nil; scoreSent = nil
+            ownThrow = true; farmStatus:Set("Throwing · waiting for normal finish")
+            local before = stats.Throws
+            local ok, err = pcall(modules.Throw.Start)
+            ownThrow = false; throwThread = nil; throwStarted = nil
+            if alive then
+                if not ok then setOff("Farm"); log("Auto Farm stopped: " .. tostring(err))
+                elseif stats.Throws == before then
+                    farmFailures = farmFailures + 1
+                    backoff.Farm = os.clock() + (farmFailures >= 3 and 15 or 3)
+                    failOnce("throw", "Throw did not complete; waiting before retry")
+                else farmFailures = 0 end
+                farmStatus:Set(opts.Farm and "Ready for next throw" or "Stopped")
+            end
+        end)
+    else farmStatus:Set("Stopped") end
+end
+local function supervise()
+    local now = os.clock()
+    if alive and loading and now - loadingStarted > 20 and not loadingWarned then
+        loadingWarned = true; connStatus:Set("Loading is taking longer")
+        log("Game module loading has not returned. No duplicate connection is started.")
+        UI:Notify("Game loading is taking longer. See Activity for details.")
+    end
+    local expiredThrow = ownThrow and throwThread and ((throwStarted and now - throwStarted > 120)
+        or (closingAt and now - closingAt > 12) or (inputFailedAt and now - inputFailedAt > 8))
+    local expiredTrain = ownTraining and trainingThread and ((stopRequestedAt and now - stopRequestedAt > 8)
+        or (closingAt and now - closingAt > 12) or (trainingStarted and now - trainingStarted > opts.TrainingSeconds + 30))
+    if expiredThrow or expiredTrain then
+        local kind = expiredThrow and "Throw" or "Training"
+        local thread = expiredThrow and throwThread or trainingThread
+        -- Cancel only our own suspended Start coroutine. The supplied game
+        -- controllers' checkDeadThrow/checkDeadTraining then run their cleanup.
+        local ok = pcall(task.cancel, thread)
+        if ok then
+            if expiredThrow then ownThrow = false; throwThread = nil; inFlight = nil; scoreSent = nil
+            else ownTraining = false; trainingThread = nil end
+            cancelledNative = {Kind = kind, Time = now}
+            if alive then
+                setOff("Farm"); pause(true); log("Stopped a stuck " .. kind:lower() .. "; waiting for game cleanup")
+            end
+        end
+    end
+    if cancelledNative then
+        if modules.State.Busy ~= cancelledNative.Kind then
+            cancelledNative = nil; actionAfter = now + 2
+        elseif now - cancelledNative.Time > 5 then
+            if alive then
+                setOff("Farm"); log("Game cleanup is still pending. Rejoin before restarting.")
+                UI:Notify("Game cleanup did not finish. Rejoin before restarting.")
+            end
+            cancelledNative.Time = math.huge
+            if not alive then detach() end
+        end
+    end
+    if not alive and not ownThrow and not ownTraining and not cancelledNative then detach() end
+end
+local tickTime = 0
+schedulerConnection = RunService.Heartbeat:Connect(function(dt)
+    tickTime = tickTime + dt
+    if tickTime < .5 then return end
+    tickTime = 0
+    if ownTraining and (paused or not opts.Farm or not opts.Cycle or os.clock() >= trainDeadline) then stopTraining() end
+    supervise()
+    if not alive then return end
+    local ok, err = pcall(runStep)
+    if not ok and alive then pause(true); failOnce("scheduler", "Paused after an error: " .. tostring(err)) end
+end)
+UI.Game = {Pause = pause, GetOptions = function() return table.clone(opts) end,
+    GetStatistics = function() return table.clone(stats) end, Reconnect = connectGame,
+    GetLiveData = extras.GetLiveData, GetSalePreview = extras.GetSalePreview,
+    SetProtected = extras.SetProtected, GetProtected = function() return table.clone(protectedNames) end,
+    SetGoals = extras.SetGoals, GetGoalState = extras.GetGoalState,
+    SetCompact = extras.SetCompact, IsCompact = extras.IsCompact}
+UI:AddCleanup(function()
+    alive = false; closingAt = os.clock()
+    if idleConnection then idleConnection:Disconnect() end
+    stopTraining()
+    -- The regular throw owns camera/character cleanup. Let this one finish; keep only
+    -- its meter assistance until it returns. No new actions can be scheduled.
+    if not ownThrow and not ownTraining then detach() end
+end)
+log("All automations start switched off")
+end
+
+end)()
+return UI
